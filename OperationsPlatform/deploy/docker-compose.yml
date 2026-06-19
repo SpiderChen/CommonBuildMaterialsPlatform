@@ -1,0 +1,33 @@
+services:
+  cbm-ops:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: common-build-materials-operations:local
+    environment:
+      CBM_OPS_ADDR: ":8095"
+      CBM_OPS_DATA: "/data/ops.json"
+      CBM_OPS_FRONTEND_DIR: "/app/frontend"
+    ports:
+      - "8095:8095"
+    volumes:
+      - cbm_ops_data:/data
+  gps-forwarder:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile.gps-forwarder
+    image: common-build-materials-operations-gps-forwarder:local
+    environment:
+      GPSF_ADDR: "0.0.0.0:19102"
+      GPSF_FORWARD_MODE: "protocol-frame"
+      GPSF_PROTOCOL: "gps-json"
+      GPSF_SOURCE: "ops-gps-forwarder"
+      GPSF_HTTP_TARGETS: "${GPSF_HTTP_TARGETS:-}"
+      GPSF_HTTP_BEARER_TOKEN: "${GPSF_HTTP_BEARER_TOKEN:-}"
+      GPSF_DEVICE_KEY: "${GPSF_DEVICE_KEY:-}"
+      GPSF_SHARED_SECRET: "${GPSF_SHARED_SECRET:-}"
+    ports:
+      - "19102:19102"
+
+volumes:
+  cbm_ops_data:

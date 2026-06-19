@@ -1,0 +1,5 @@
+backend/data/
+backend/dist/
+.DS_Store
+*.log
+*.tmp

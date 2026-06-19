@@ -1,0 +1,11 @@
+frontend/node_modules
+frontend/build
+frontend/dist
+backend/dist
+industrial-control-gateway/dist
+customer-site-agent/dist
+gps-forwarder/dist
+dist
+backend/data
+.git
+.DS_Store

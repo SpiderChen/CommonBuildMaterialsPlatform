@@ -1,0 +1,17 @@
+.DS_Store
+.tools/
+dist/
+backend/dist/
+industrial-control-gateway/dist/
+customer-site-agent/dist/
+gps-forwarder/dist/
+customer-site-agent/data/
+backend/data/*.vault
+backend/data/*.vault.tmp
+backend/data/*.log
+frontend/build/
+frontend/bin/
+frontend/dist/
+frontend/node_modules/
+frontend/wailsjs/
+*.log

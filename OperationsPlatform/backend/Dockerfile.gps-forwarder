@@ -1,0 +1,15 @@
+FROM golang:1.22-alpine AS builder
+WORKDIR /src
+COPY backend/go.mod ./backend/go.mod
+COPY backend/cmd ./backend/cmd
+COPY backend/internal ./backend/internal
+WORKDIR /src/backend
+RUN go build -trimpath -ldflags="-s -w" -o /out/gps-forwarder ./cmd/gps-forwarder
+
+FROM alpine:3.20
+RUN adduser -D -H -u 10001 app
+USER app
+WORKDIR /app
+COPY --from=builder /out/gps-forwarder /usr/local/bin/gps-forwarder
+EXPOSE 19102
+ENTRYPOINT ["gps-forwarder"]
