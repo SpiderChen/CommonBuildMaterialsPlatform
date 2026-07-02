@@ -28,7 +28,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
@@ -41,9 +41,21 @@ jobs:
         working-directory: ERP/frontend
         run: wails build -platform windows/amd64 -webview2 browser -o CommonBuildMaterialsPlatform.exe
 
+      - name: Record build source revision
+        run: |
+          mkdir -p ERP/frontend/build/bin
+          printf "commit=%s\n" "${GITHUB_SHA}" > ERP/frontend/build/bin/build-source.txt
+          printf "ref=%s\n" "${GITHUB_REF}" >> ERP/frontend/build/bin/build-source.txt
+          printf "runner=%s\n" "${GITHUB_RUN_ID}" >> ERP/frontend/build/bin/build-source.txt
+
+      - name: Show built file size
+        run: ls -lh ERP/frontend/build/bin/CommonBuildMaterialsPlatform.exe ERP/frontend/build/bin/build-source.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CommonBuildMaterialsPlatform-windows-exe
-          path: ERP/frontend/build/bin/CommonBuildMaterialsPlatform.exe
+          name: CommonBuildMaterialsPlatform-windows-${{ github.sha }}
+          path: |
+            ERP/frontend/build/bin/CommonBuildMaterialsPlatform.exe
+            ERP/frontend/build/bin/build-source.txt
           if-no-files-found: error
