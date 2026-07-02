@@ -12,7 +12,7 @@ func TestMasterResourceCreationCoversDeliveryBasics(t *testing.T) {
 	app := newTestHTTPApp(t)
 	token := testLogin(t, app, "admin", "admin123")
 
-	rec := testRequest(t, app, token, http.MethodPost, "/api/master/products", `{"name":"UHPC 超高性能混凝土","spec":"C120","basePrice":1200,"costPrice":860}`)
+	rec := testRequest(t, app, token, http.MethodPost, "/api/master/products", `{"name":"SMA 改性沥青混合料","spec":"SMA-13","basePrice":1200,"costPrice":860}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create product status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -20,7 +20,7 @@ func TestMasterResourceCreationCoversDeliveryBasics(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &product); err != nil {
 		t.Fatalf("decode product: %v", err)
 	}
-	if product.ID == 0 || product.Line != "concrete" || product.Unit != "m3" || product.Status != "active" {
+	if product.ID == 0 || product.Line != "asphalt" || product.Unit != "t" || product.Status != "active" {
 		t.Fatalf("unexpected product defaults: %+v", product)
 	}
 
@@ -56,8 +56,20 @@ func TestMasterResourceCreationCoversDeliveryBasics(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &site); err != nil {
 		t.Fatalf("decode site: %v", err)
 	}
-	if site.ID == 0 || site.Status != "running" {
+	if site.ID == 0 || site.Status != "active" {
 		t.Fatalf("unexpected site defaults: %+v", site)
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/plants", `{"siteId":`+strconv.FormatInt(site.ID, 10)+`,"name":"龙岗 240 沥青线","code":"LG-AMP240","capacity":"240t/h"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create plant status %d: %s", rec.Code, rec.Body.String())
+	}
+	var plant Plant
+	if err := json.Unmarshal(rec.Body.Bytes(), &plant); err != nil {
+		t.Fatalf("decode plant: %v", err)
+	}
+	if plant.ID == 0 || plant.SiteID != site.ID || plant.Status != "running" || plant.Interface != "" {
+		t.Fatalf("unexpected plant defaults: %+v", plant)
 	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/master/inventory", `{"siteId":`+strconv.FormatInt(site.ID, 10)+`,"materialId":`+strconv.FormatInt(material.ID, 10)+`,"quantity":32}`)
@@ -93,10 +105,11 @@ func TestMasterResourceCreationCoversDeliveryBasics(t *testing.T) {
 		path string
 		want string
 	}{
-		{"/api/master/products", "UHPC 超高性能混凝土"},
+		{"/api/master/products", "SMA 改性沥青混合料"},
 		{"/api/master/materials", "硅灰"},
 		{"/api/master/projects", "深圳北站扩建"},
 		{"/api/master/sites", "龙岗交付站"},
+		{"/api/master/plants", "LG-AMP240"},
 		{"/api/master/inventory", strconv.FormatInt(material.ID, 10)},
 		{"/api/master/drivers", "赵师傅"},
 		{"/api/master/carriers", "湾区承运服务"},
@@ -104,6 +117,96 @@ func TestMasterResourceCreationCoversDeliveryBasics(t *testing.T) {
 		rec = testRequest(t, app, token, http.MethodGet, item.path, "")
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), item.want) {
 			t.Fatalf("list %s missing %s, status %d: %s", item.path, item.want, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestSiteCreateAndUpdateSyncsGeoFence(t *testing.T) {
+	app := newTestHTTPApp(t)
+	token := testLogin(t, app, "admin", "admin123")
+
+	body := `{"companyId":1,"name":"Fence Site","code":"FENCE-SITE","address":"site address","longitude":113.9123,"latitude":22.5123,"fenceRadius":650}`
+	rec := testRequest(t, app, token, http.MethodPost, "/api/master/sites", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create site status %d: %s", rec.Code, rec.Body.String())
+	}
+	var site Site
+	if err := json.Unmarshal(rec.Body.Bytes(), &site); err != nil {
+		t.Fatalf("decode site: %v", err)
+	}
+	fence := loadSiteFence(t, app, token, site.ID)
+	if fence.Type != "site" || fence.Shape != "circle" || fence.Radius != 650 || fence.Longitude != 113.9123 || fence.Latitude != 22.5123 {
+		t.Fatalf("unexpected created site fence: %+v", fence)
+	}
+
+	update := `{"companyId":1,"name":"Fence Site Updated","code":"FENCE-SITE","address":"site address","longitude":113.9234,"latitude":22.5234,"fenceRadius":880}`
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/sites/"+strconv.FormatInt(site.ID, 10), update)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update site status %d: %s", rec.Code, rec.Body.String())
+	}
+	updatedFence := loadSiteFence(t, app, token, site.ID)
+	if updatedFence.ID != fence.ID || updatedFence.Name != "Fence Site Updated围栏" || updatedFence.Radius != 880 || updatedFence.Longitude != 113.9234 || updatedFence.Latitude != 22.5234 {
+		t.Fatalf("unexpected updated site fence: %+v", updatedFence)
+	}
+}
+
+func loadSiteFence(t *testing.T, app *App, token string, siteID int64) GeoFence {
+	t.Helper()
+	rec := testRequest(t, app, token, http.MethodGet, "/api/vehicle/fences", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list fences status %d: %s", rec.Code, rec.Body.String())
+	}
+	var fences []GeoFence
+	if err := json.Unmarshal(rec.Body.Bytes(), &fences); err != nil {
+		t.Fatalf("decode fences: %v", err)
+	}
+	for _, fence := range fences {
+		if fence.Type == "site" && fence.SiteID == siteID && fence.Status == "active" {
+			return fence
+		}
+	}
+	t.Fatalf("site fence for %d not found in %+v", siteID, fences)
+	return GeoFence{}
+}
+
+func TestLegacyWarehouseSiloMasterEndpointsRemoved(t *testing.T) {
+	app := newTestHTTPApp(t)
+	token := testLogin(t, app, "admin", "admin123")
+
+	for _, item := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/master/warehouses", ""},
+		{http.MethodPost, "/api/master/warehouses", `{"siteId":1,"name":"旧仓库","code":"OLD-WH"}`},
+		{http.MethodPut, "/api/master/warehouses/1", `{"siteId":1,"name":"旧仓库","code":"OLD-WH"}`},
+		{http.MethodDelete, "/api/master/warehouses/1", ""},
+		{http.MethodGet, "/api/master/silos", ""},
+		{http.MethodPost, "/api/master/silos", `{"warehouseId":1,"materialId":1,"name":"旧筒仓","code":"OLD-SILO"}`},
+		{http.MethodPut, "/api/master/silos/1", `{"warehouseId":1,"materialId":1,"name":"旧筒仓","code":"OLD-SILO"}`},
+		{http.MethodDelete, "/api/master/silos/1", ""},
+	} {
+		rec := testRequest(t, app, token, item.method, item.path, item.body)
+		if rec.Code == http.StatusOK || rec.Code == http.StatusCreated {
+			t.Fatalf("%s %s should be removed, got %d: %s", item.method, item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	for _, path := range []string{"/api/bootstrap", "/api/procurement/overview"} {
+		rec := testRequest(t, app, token, http.MethodGet, path, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("load %s status %d: %s", path, rec.Code, rec.Body.String())
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if _, ok := payload["warehouses"]; ok {
+			t.Fatalf("%s should not expose warehouses: %s", path, rec.Body.String())
+		}
+		if _, ok := payload["silos"]; ok {
+			t.Fatalf("%s should not expose silos: %s", path, rec.Body.String())
 		}
 	}
 }
@@ -141,13 +244,30 @@ func TestMasterResourcesSupportUpdateAndDelete(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &product); err != nil {
 		t.Fatalf("decode product: %v", err)
 	}
-	rec = testRequest(t, app, token, http.MethodPut, "/api/master/products/"+strconv.FormatInt(product.ID, 10), `{"name":"CRUD Product Updated","spec":"C40","basePrice":430,"unit":"m3"}`)
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/products/"+strconv.FormatInt(product.ID, 10), `{"name":"CRUD Product Updated","spec":"AC-20","basePrice":430,"unit":"t"}`)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "CRUD Product Updated") {
 		t.Fatalf("update product failed status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/products/"+strconv.FormatInt(product.ID, 10), "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete product status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/carriers", `{"name":"CRUD Carrier","contact":"Dispatch","phone":"13600000000"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create carrier status %d: %s", rec.Code, rec.Body.String())
+	}
+	var carrier Carrier
+	if err := json.Unmarshal(rec.Body.Bytes(), &carrier); err != nil {
+		t.Fatalf("decode carrier: %v", err)
+	}
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/carriers/"+strconv.FormatInt(carrier.ID, 10), `{"name":"CRUD Carrier Updated","contact":"Dispatch Updated","phone":"13700000000","settleMode":"per_trip","status":"active"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "CRUD Carrier Updated") {
+		t.Fatalf("update carrier failed status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/carriers/"+strconv.FormatInt(carrier.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete carrier status %d: %s", rec.Code, rec.Body.String())
 	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/master/materials", `{"name":"CRUD Material","spec":"M1","safeStock":10}`)
@@ -165,6 +285,18 @@ func TestMasterResourcesSupportUpdateAndDelete(t *testing.T) {
 	var site Site
 	if err := json.Unmarshal(rec.Body.Bytes(), &site); err != nil {
 		t.Fatalf("decode site: %v", err)
+	}
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/plants", `{"siteId":`+strconv.FormatInt(site.ID, 10)+`,"name":"CRUD Plant","code":"CRUD-PLANT","capacity":"160t/h"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create plant status %d: %s", rec.Code, rec.Body.String())
+	}
+	var plant Plant
+	if err := json.Unmarshal(rec.Body.Bytes(), &plant); err != nil {
+		t.Fatalf("decode plant: %v", err)
+	}
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/plants/"+strconv.FormatInt(plant.ID, 10), `{"siteId":`+strconv.FormatInt(site.ID, 10)+`,"name":"CRUD Plant Updated","code":"CRUD-PLANT-2","capacity":"200t/h","status":"active"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "CRUD Plant Updated") {
+		t.Fatalf("update plant failed status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = testRequest(t, app, token, http.MethodPost, "/api/master/inventory", `{"siteId":`+strconv.FormatInt(site.ID, 10)+`,"materialId":`+strconv.FormatInt(material.ID, 10)+`,"warehouse":"A","quantity":12}`)
 	if rec.Code != http.StatusCreated {
@@ -185,6 +317,10 @@ func TestMasterResourcesSupportUpdateAndDelete(t *testing.T) {
 	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/materials/"+strconv.FormatInt(material.ID, 10), "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete material status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/plants/"+strconv.FormatInt(plant.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete plant status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/sites/"+strconv.FormatInt(site.ID, 10), "")
 	if rec.Code != http.StatusOK {

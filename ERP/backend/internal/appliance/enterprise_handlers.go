@@ -12,17 +12,18 @@ func (a *App) procurement(w http.ResponseWriter, r *http.Request, session Sessio
 	if len(parts) == 0 || parts[0] == "overview" {
 		data := scopedData(a.mustSnapshot(), session.User)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"requests":   data.PurchaseRequests,
-			"orders":     data.PurchaseOrders,
-			"receipts":   data.RawMaterialReceipts,
-			"flows":      data.InventoryFlows,
-			"inventory":  data.Inventory,
-			"transfers":  data.InventoryTransfers,
-			"stocktakes": data.InventoryStocktakes,
-			"traces":     data.InventoryBatchTraces,
-			"suppliers":  data.Suppliers,
-			"warehouses": data.Warehouses,
-			"silos":      data.Silos,
+			"requests":       data.PurchaseRequests,
+			"orders":         data.PurchaseOrders,
+			"receipts":       data.RawMaterialReceipts,
+			"flows":          data.InventoryFlows,
+			"inventory":      data.Inventory,
+			"stockYards":     data.StockYards,
+			"stockYardPiles": data.StockYardPiles,
+			"stockYardFlows": data.StockYardFlows,
+			"transfers":      data.InventoryTransfers,
+			"stocktakes":     data.InventoryStocktakes,
+			"traces":         data.InventoryBatchTraces,
+			"suppliers":      data.Suppliers,
 		})
 		return
 	}
@@ -43,6 +44,12 @@ func (a *App) procurement(w http.ResponseWriter, r *http.Request, session Sessio
 			writeJSON(w, http.StatusOK, data.InventoryTransfers)
 		case "stocktakes":
 			writeJSON(w, http.StatusOK, data.InventoryStocktakes)
+		case "stock-yards":
+			writeJSON(w, http.StatusOK, data.StockYards)
+		case "stock-yard-piles":
+			writeJSON(w, http.StatusOK, data.StockYardPiles)
+		case "stock-yard-flows":
+			writeJSON(w, http.StatusOK, data.StockYardFlows)
 		default:
 			writeError(w, http.StatusNotFound, "unknown procurement resource")
 		}
@@ -69,6 +76,10 @@ func (a *App) procurement(w http.ResponseWriter, r *http.Request, session Sessio
 			return
 		}
 		a.createInventoryStocktake(w, r, session)
+	case "yard-receipts":
+		a.createStockYardReceipt(w, r, session)
+	case "yard-adjustments":
+		a.createStockYardAdjustment(w, r, session)
 	default:
 		writeError(w, http.StatusNotFound, "unknown procurement route")
 	}
@@ -128,16 +139,27 @@ func (a *App) createRawMaterialReceipt(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	err := a.store.Mutate(func(data *AppData) error {
+		var requestSiteID int64
 		if item.PurchaseOrderID != 0 {
 			if po, ok := findPurchaseOrder(*data, item.PurchaseOrderID); ok {
 				item.SupplierID = nonZeroInt(item.SupplierID, po.SupplierID)
 				item.MaterialID = nonZeroInt(item.MaterialID, po.MaterialID)
+				requestSiteID = purchaseRequestSiteID(*data, po.RequestID)
+				item.SiteID = nonZeroInt(item.SiteID, requestSiteID)
 			}
 		}
-		if _, ok := findSupplier(*data, item.SupplierID); !ok {
+		var err error
+		item.SiteID, err = writableSiteID(*data, session.User, item.SiteID)
+		if err != nil {
+			return err
+		}
+		if requestSiteID != 0 && item.SiteID != requestSiteID {
+			return fmt.Errorf("入库站点必须与采购申请站点一致")
+		}
+		if _, ok := scopedSupplier(*data, session.User, item.SupplierID); !ok {
 			return fmt.Errorf("供应商不存在")
 		}
-		if _, ok := findMaterial(*data, item.MaterialID); !ok {
+		if _, ok := scopedMaterial(*data, session.User, item.MaterialID); !ok {
 			return fmt.Errorf("物料不存在")
 		}
 		item.ID = nextID(data, "receipt")
@@ -316,6 +338,14 @@ func (a *App) createInvoice(w http.ResponseWriter, r *http.Request, session Sess
 		if !ok {
 			return fmt.Errorf("对账单不存在")
 		}
+		if statement.Status != "confirmed" {
+			return fmt.Errorf("对账单未确认或已开票")
+		}
+		for _, existing := range data.SalesInvoices {
+			if existing.StatementID == statement.ID && existing.InvoiceType != "red" && existing.Status != "cancelled" {
+				return fmt.Errorf("对账单已存在蓝字发票")
+			}
+		}
 		rate := req.TaxRate
 		if rate == 0 {
 			rate = 0.13
@@ -376,10 +406,7 @@ func (a *App) submitTaxInvoice(w http.ResponseWriter, r *http.Request, session S
 				Actor:        session.User.Username,
 			}
 			if submission.Provider == "" {
-				submission.Provider = "local-simulator"
-			}
-			if submission.Endpoint == "" {
-				submission.Endpoint = "tax://local-simulator"
+				submission.Provider = defaultTaxGatewayProvider(submission.Endpoint)
 			}
 			data.TaxGatewaySubmissions = append(data.TaxGatewaySubmissions, submission)
 			addAudit(data, session.User.Username, "submit_tax_start", "sales_invoice", id, submission.SubmissionNo, clientIP(r))
@@ -520,10 +547,7 @@ func (a *App) redOffsetInvoice(w http.ResponseWriter, r *http.Request, session S
 			Actor:        session.User.Username,
 		}
 		if submission.Provider == "" {
-			submission.Provider = "local-simulator"
-		}
-		if submission.Endpoint == "" {
-			submission.Endpoint = "tax://local-simulator"
+			submission.Provider = defaultTaxGatewayProvider(submission.Endpoint)
 		}
 		data.TaxGatewaySubmissions = append(data.TaxGatewaySubmissions, submission)
 		addAudit(data, session.User.Username, "red_offset_start", "sales_invoice", original.ID, redInvoice.InvoiceNo, clientIP(r))
@@ -828,22 +852,123 @@ func (a *App) rules(w http.ResponseWriter, r *http.Request, session Session, par
 			writeJSON(w, http.StatusOK, a.mustSnapshot().RuleDefinitions)
 			return
 		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 		var item RuleDefinition
 		if err := readJSON(r, &item); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid rule")
 			return
 		}
+		var saved RuleDefinition
 		err := a.store.Mutate(func(data *AppData) error {
-			item.ID = nextID(data, "rule")
-			item.Enabled = true
-			data.RuleDefinitions = append(data.RuleDefinitions, item)
-			addAudit(data, session.User.Username, "create", "rule_definition", item.ID, item.Code, clientIP(r))
+			normalized, err := normalizeRuleDefinition(item)
+			if err != nil {
+				return err
+			}
+			if item.ID > 0 {
+				for i := range data.RuleDefinitions {
+					if data.RuleDefinitions[i].ID != item.ID {
+						continue
+					}
+					for j := range data.RuleDefinitions {
+						if j != i && strings.EqualFold(data.RuleDefinitions[j].Code, normalized.Code) {
+							return fmt.Errorf("规则编码已存在")
+						}
+					}
+					data.RuleDefinitions[i] = normalized
+					saved = normalized
+					addAudit(data, session.User.Username, "update", "rule_definition", normalized.ID, normalized.Code, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("规则不存在")
+			}
+			for _, existing := range data.RuleDefinitions {
+				if strings.EqualFold(existing.Code, normalized.Code) {
+					return fmt.Errorf("规则编码已存在")
+				}
+			}
+			normalized.ID = nextID(data, "rule")
+			data.RuleDefinitions = append(data.RuleDefinitions, normalized)
+			saved = normalized
+			addAudit(data, session.User.Username, "create", "rule_definition", normalized.ID, normalized.Code, clientIP(r))
 			return nil
 		})
-		a.respondMutation(w, err, item, "rule.definition.created")
+		a.respondMutation(w, err, saved, "rule.definition.saved")
+		return
+	}
+	if len(parts) == 3 && parts[0] == "definitions" && parts[2] == "status" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = readJSON(r, &req)
+		var saved RuleDefinition
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.RuleDefinitions {
+				if data.RuleDefinitions[i].ID != id {
+					continue
+				}
+				data.RuleDefinitions[i].Enabled = req.Enabled
+				saved = data.RuleDefinitions[i]
+				addAudit(data, session.User.Username, "status", "rule_definition", id, saved.Code, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("规则不存在")
+		})
+		a.respondMutation(w, err, saved, "rule.definition.status")
+		return
+	}
+	if len(parts) == 2 && parts[0] == "definitions" && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var deleted RuleDefinition
+		err := a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.RuleDefinitions {
+				if item.ID != id {
+					continue
+				}
+				if item.Enabled {
+					return fmt.Errorf("启用中的规则不能删除，请先停用")
+				}
+				deleted = item
+				data.RuleDefinitions = append(data.RuleDefinitions[:i], data.RuleDefinitions[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "rule_definition", id, item.Code, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("规则不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("rule.definition.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown rule route")
+}
+
+func normalizeRuleDefinition(item RuleDefinition) (RuleDefinition, error) {
+	code := strings.TrimSpace(item.Code)
+	name := strings.TrimSpace(item.Name)
+	metric := strings.TrimSpace(item.Metric)
+	if code == "" || name == "" || metric == "" {
+		return RuleDefinition{}, fmt.Errorf("规则编码、名称和指标不能为空")
+	}
+	return RuleDefinition{
+		ID:          item.ID,
+		Code:        code,
+		Name:        name,
+		Category:    fallback(strings.TrimSpace(item.Category), "vehicle"),
+		Metric:      metric,
+		Operator:    fallback(strings.TrimSpace(item.Operator), ">"),
+		Threshold:   item.Threshold,
+		Level:       fallback(strings.TrimSpace(item.Level), "warning"),
+		Enabled:     item.Enabled,
+		NotifyRoles: normalizeStringList(item.NotifyRoles),
+		Description: strings.TrimSpace(item.Description),
+	}, nil
 }
 
 func (a *App) evaluateRules(w http.ResponseWriter, r *http.Request, session Session) {
@@ -904,30 +1029,159 @@ func (a *App) handleAlarm(w http.ResponseWriter, r *http.Request, session Sessio
 
 func (a *App) integrations(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
 	data := scopedData(a.mustSnapshot(), session.User)
-	if len(parts) == 0 || parts[0] == "overview" {
+	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "overview") {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"endpoints":      data.IntegrationEndpoints,
 			"vehicleDevices": data.VehicleDevices,
 			"scaleDevices":   data.ScaleDevices,
-			"plants":         data.Plants,
+			"plants":         plantsWithGatewayStatus(data),
 			"protocolFrames": data.DeviceProtocolFrames,
 		})
 		return
 	}
 	switch parts[0] {
 	case "endpoints":
-		writeJSON(w, http.StatusOK, data.IntegrationEndpoints)
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, data.IntegrationEndpoints)
+			return
+		}
+		if len(parts) == 1 && r.Method == http.MethodPost {
+			var req IntegrationEndpoint
+			if err := readJSON(r, &req); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid integration endpoint payload")
+				return
+			}
+			var saved IntegrationEndpoint
+			err := a.store.Mutate(func(data *AppData) error {
+				endpoint, err := normalizeIntegrationEndpoint(req)
+				if err != nil {
+					return err
+				}
+				if req.ID > 0 {
+					for i := range data.IntegrationEndpoints {
+						if data.IntegrationEndpoints[i].ID != req.ID {
+							continue
+						}
+						for j := range data.IntegrationEndpoints {
+							if j != i && sameIntegrationEndpointKey(data.IntegrationEndpoints[j], endpoint) {
+								return fmt.Errorf("集成端点已存在")
+							}
+						}
+						endpoint.LastSyncAt = data.IntegrationEndpoints[i].LastSyncAt
+						data.IntegrationEndpoints[i] = endpoint
+						saved = endpoint
+						addAudit(data, session.User.Username, "update", "integration_endpoint", endpoint.ID, endpoint.Name+"/"+endpoint.Type, clientIP(r))
+						return nil
+					}
+					return fmt.Errorf("集成端点不存在")
+				}
+				for _, existing := range data.IntegrationEndpoints {
+					if sameIntegrationEndpointKey(existing, endpoint) {
+						return fmt.Errorf("集成端点已存在")
+					}
+					ensureCounterAtLeast(data, "integration", existing.ID)
+				}
+				endpoint.ID = nextID(data, "integration")
+				data.IntegrationEndpoints = append(data.IntegrationEndpoints, endpoint)
+				saved = endpoint
+				addAudit(data, session.User.Username, "create", "integration_endpoint", endpoint.ID, endpoint.Name+"/"+endpoint.Type, clientIP(r))
+				return nil
+			})
+			a.respondMutation(w, err, saved, "integration.endpoint.saved")
+			return
+		}
+		if len(parts) == 3 && parts[2] == "status" && r.Method == http.MethodPost {
+			id, _ := strconv.ParseInt(parts[1], 10, 64)
+			var req struct {
+				Status string `json:"status"`
+			}
+			_ = readJSON(r, &req)
+			var saved IntegrationEndpoint
+			err := a.store.Mutate(func(data *AppData) error {
+				status := fallback(strings.TrimSpace(req.Status), "online")
+				for i := range data.IntegrationEndpoints {
+					if data.IntegrationEndpoints[i].ID != id {
+						continue
+					}
+					data.IntegrationEndpoints[i].Status = status
+					saved = data.IntegrationEndpoints[i]
+					addAudit(data, session.User.Username, "status", "integration_endpoint", id, saved.Name+"/"+status, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("集成端点不存在")
+			})
+			a.respondMutation(w, err, saved, "integration.endpoint.status")
+			return
+		}
+		if len(parts) == 2 && r.Method == http.MethodDelete {
+			id, _ := strconv.ParseInt(parts[1], 10, 64)
+			var deleted IntegrationEndpoint
+			err := a.store.Mutate(func(data *AppData) error {
+				for i, item := range data.IntegrationEndpoints {
+					if item.ID != id {
+						continue
+					}
+					if item.Status != "disabled" {
+						return fmt.Errorf("启用中的集成端点不能删除，请先停用")
+					}
+					deleted = item
+					data.IntegrationEndpoints = append(data.IntegrationEndpoints[:i], data.IntegrationEndpoints[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "integration_endpoint", id, item.Name+"/"+item.Type, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("集成端点不存在")
+			})
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			a.emit("integration.endpoint.deleted", deleted)
+			writeJSON(w, http.StatusOK, deleted)
+			return
+		}
+		writeError(w, http.StatusNotFound, "unknown integration endpoint route")
 	case "vehicle-devices":
 		writeJSON(w, http.StatusOK, data.VehicleDevices)
 	case "scale-devices":
 		writeJSON(w, http.StatusOK, data.ScaleDevices)
 	case "plants":
-		writeJSON(w, http.StatusOK, data.Plants)
+		writeJSON(w, http.StatusOK, plantsWithGatewayStatus(data))
 	case "protocol-frames":
 		writeJSON(w, http.StatusOK, data.DeviceProtocolFrames)
 	default:
 		writeError(w, http.StatusNotFound, "unknown integration resource")
 	}
+}
+
+func normalizeIntegrationEndpoint(req IntegrationEndpoint) (IntegrationEndpoint, error) {
+	name := strings.TrimSpace(req.Name)
+	endpointType := strings.TrimSpace(req.Type)
+	if name == "" || endpointType == "" {
+		return IntegrationEndpoint{}, fmt.Errorf("集成端点名称和类型不能为空")
+	}
+	url := strings.TrimSpace(req.URL)
+	if url != "" {
+		if err := validateNoMockEndpoint(url, "集成端点 URL"); err != nil {
+			return IntegrationEndpoint{}, err
+		}
+	}
+	status := fallback(strings.TrimSpace(req.Status), "online")
+	if url == "" && status != "disabled" {
+		return IntegrationEndpoint{}, fmt.Errorf("启用集成端点必须配置 URL")
+	}
+	return IntegrationEndpoint{
+		ID:       req.ID,
+		Name:     name,
+		Type:     endpointType,
+		Protocol: fallback(strings.TrimSpace(req.Protocol), "rest/http"),
+		URL:      url,
+		Status:   status,
+	}, nil
+}
+
+func sameIntegrationEndpointKey(left IntegrationEndpoint, right IntegrationEndpoint) bool {
+	return strings.EqualFold(strings.TrimSpace(left.Type), strings.TrimSpace(right.Type)) &&
+		strings.EqualFold(strings.TrimSpace(left.Name), strings.TrimSpace(right.Name))
 }
 
 func findSupplier(data AppData, id int64) (Supplier, bool) {

@@ -1,4 +1,5 @@
 import type {
+  AuditLog,
   ApprovalFlow,
   ApprovalTask,
   BackupDrill,
@@ -11,6 +12,7 @@ import type {
   DeliverySign,
   DeliverySignAttachment,
   DeliverySignLink,
+  DeliveryNote,
   DispatchCenterOverview,
   DispatchOrder,
   DispatchSchedule,
@@ -20,12 +22,14 @@ import type {
   GatewayRoute,
   GeoFence,
   GeoFenceEvent,
+  IntegrationEndpoint,
   IntegrationOverview,
   InventoryItem,
   InventoryStocktake,
   InventoryTransfer,
   InvoiceDownload,
   LatestLocation,
+  DeviceCredential,
   LaboratoryCalibration,
   LaboratoryEquipment,
   LaboratoryOverview,
@@ -45,22 +49,32 @@ import type {
   ManagementReports,
   MFAEnrollment,
   MixDesign,
+  MixDesignPlantProfile,
   MixDesignTrialRun,
+  ModuleInfo,
   OIDCLoginStart,
   OIDCProvider,
+  OrganizationOverview,
   SCIMProvider,
+  SecurityPolicy,
+  Payment,
   PaymentPlan,
+  Plant,
+  PlantBufferFlow,
+  PlantBufferLocation,
   PortalOverview,
   Product,
   PricePolicy,
   Project,
   PricingQuote,
   TrackReplay,
+  VehicleLocationEvent,
   PluginInfo,
   PluginRun,
   ProductionBatch,
   ProductionDailyReport,
   ProductionOverview,
+  ProductionPlan,
   ProductionTask,
   ProcurementOverview,
   PublicDeliverySignDetail,
@@ -73,6 +87,8 @@ import type {
   Receivable,
   Receipt,
   RedLetterInfo,
+  Role,
+  RuleDefinition,
   RuleOverview,
   SalesOrder,
   SalesOrderLine,
@@ -80,6 +96,9 @@ import type {
   ScaleDeviceEvent,
   ScaleWeightRecord,
   Site,
+  StockYard,
+  StockYardFlow,
+  StockYardPile,
   Statement,
   SupplierStatement,
   TicketPrintLog,
@@ -91,6 +110,7 @@ import type {
   User,
   Vehicle,
   VehicleAlarm,
+  VehicleDevice,
   Driver,
   CustomerContact,
   CustomerBlacklist,
@@ -103,19 +123,137 @@ import type {
   CollectionDispatch,
   DataDictionary,
   TransportSettlement,
-  TransportSettlementItem
+  TransportSettlementItem,
+  WorkflowAutomationRun,
+  WorkflowDefinition,
+  WorkflowEvent,
+  WorkflowEventQuery,
+  WorkflowCatalog,
+  WorkflowEventPreview,
+  WorkflowInstance,
+  WorkflowInstanceQuery,
+  WorkflowLog,
+  WorkflowLogQuery,
+  WorkflowTask,
+  WorkflowTaskQuery,
+  WorkflowDelivery,
+  WorkflowDeliveryDispatchBatch,
+  WorkflowDeliveryQuery,
+  WorkflowInboxItem,
+  WorkflowOutbox,
+  WorkflowOutboxQuery,
+  WorkflowOverview,
+  WorkflowSubscription
 } from "./types";
 
 const browserOrigin = typeof window !== "undefined" ? window.location.origin : "";
 const browserHost = typeof window !== "undefined" ? window.location.hostname : "";
 const isWailsHost = browserHost === "wails.localhost" || browserHost.endsWith(".wails.localhost");
 const defaultAPIRoot = browserOrigin && !isWailsHost ? `${browserOrigin}/api` : "http://127.0.0.1:8088/api";
-const API_ROOT = (import.meta.env.VITE_API_BASE_URL || defaultAPIRoot).replace(/\/$/, "");
+const configuredAPIRoot = import.meta.env.VITE_API_BASE_URL || defaultAPIRoot;
+const API_ROOT_STORAGE_KEY = "cbmp.apiRoot";
+
+function normalizeAPIRoot(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return normalizeAPIRoot(configuredAPIRoot);
+  if (trimmed.startsWith("/")) {
+    const root = trimmed.replace(/\/+$/, "") || "/api";
+    return root.endsWith("/api") ? root : `${root}/api`;
+  }
+
+  const withScheme = !/^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed) ? `http://${trimmed}` : trimmed;
+  const parsed = new URL(withScheme);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Unsupported server URL protocol");
+  }
+  parsed.hash = "";
+  parsed.search = "";
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  if (!parsed.pathname || parsed.pathname === "/") {
+    parsed.pathname = "/api";
+  } else if (!parsed.pathname.endsWith("/api")) {
+    parsed.pathname = `${parsed.pathname}/api`;
+  }
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function savedAPIRoot() {
+  if (typeof window === "undefined") return normalizeAPIRoot(configuredAPIRoot);
+  try {
+    return normalizeAPIRoot(window.localStorage.getItem(API_ROOT_STORAGE_KEY) || configuredAPIRoot);
+  } catch {
+    window.localStorage.removeItem(API_ROOT_STORAGE_KEY);
+    return normalizeAPIRoot(configuredAPIRoot);
+  }
+}
+
+let currentAPIRoot = savedAPIRoot();
+
+export function defaultAPIBaseURL() {
+  return normalizeAPIRoot(configuredAPIRoot);
+}
+
+export function getAPIBaseURL() {
+  return currentAPIRoot;
+}
+
+export function setAPIBaseURL(value: string) {
+  const next = normalizeAPIRoot(value);
+  currentAPIRoot = next;
+  window.localStorage.setItem(API_ROOT_STORAGE_KEY, next);
+  return next;
+}
+
+export function resetAPIBaseURL() {
+  const next = defaultAPIBaseURL();
+  currentAPIRoot = next;
+  window.localStorage.removeItem(API_ROOT_STORAGE_KEY);
+  return next;
+}
 
 type RequestOptions = RequestInit & { anonymous?: boolean };
+type QueryValue = string | number | boolean | null | undefined;
+
+function querySuffix(params: object = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params) as Array<[string, QueryValue]>) {
+    if (value === undefined || value === null || value === "") continue;
+    query.set(key, String(value));
+  }
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
 
 export class APIClient {
   token = localStorage.getItem("cbmp.token") || "";
+
+  baseURL() {
+    return getAPIBaseURL();
+  }
+
+  defaultBaseURL() {
+    return defaultAPIBaseURL();
+  }
+
+  setBaseURL(value: string) {
+    return setAPIBaseURL(value);
+  }
+
+  resetBaseURL() {
+    return resetAPIBaseURL();
+  }
+
+  async testConnection(value = this.baseURL()) {
+    const root = normalizeAPIRoot(value);
+    const response = await fetch(`${root}/health`, {
+      credentials: "include"
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(payload.error || response.statusText);
+    }
+    return response.json().catch(() => ({ status: "ok" }));
+  }
 
   async login(username: string, password: string, mfaCode = "") {
     const result = await this.request<LoginResult>("/auth/login", {
@@ -144,6 +282,20 @@ export class APIClient {
 
   async bootstrap() {
     return this.request<BootstrapData>("/bootstrap");
+  }
+
+  async updateAccountProfile(payload: { displayName: string }) {
+    return this.request<User>("/account/profile", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async changeAccountPassword(payload: { currentPassword: string; newPassword: string }) {
+    return this.request<User>("/account/password", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
   }
 
   async dashboard() {
@@ -225,8 +377,43 @@ export class APIClient {
     });
   }
 
+  async createVehicleDevice(payload: Partial<VehicleDevice> & Pick<VehicleDevice, "vehicleId" | "deviceNo">) {
+    return this.request<VehicleDevice>("/master/vehicle-devices", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
   async createSite(payload: Partial<Site> & Pick<Site, "name" | "code">) {
     return this.request<Site>("/master/sites", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createPlant(payload: Partial<Plant> & Pick<Plant, "siteId" | "name" | "code">) {
+    return this.request<Plant>("/master/plants", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createPlantBufferLocation(payload: Partial<PlantBufferLocation> & Pick<PlantBufferLocation, "siteId" | "plantId" | "code" | "name">) {
+    return this.request<PlantBufferLocation>("/master/plant-buffer-locations", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createStockYard(payload: Partial<StockYard> & Pick<StockYard, "siteId" | "code" | "name">) {
+    return this.request<StockYard>("/master/stock-yards", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createStockYardPile(payload: Partial<StockYardPile> & Pick<StockYardPile, "yardId" | "code" | "name">) {
+    return this.request<StockYardPile>("/master/stock-yard-piles", {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -294,7 +481,7 @@ export class APIClient {
   }
 
   async releaseCustomerBlacklist(id: number) {
-    return this.request<CustomerBlacklist>(`/master/customer-blacklists/${id}/release`, { method: "POST" });
+    return this.request<CustomerBlacklist | WorkflowInstance>(`/master/customer-blacklists/${id}/release`, { method: "POST" });
   }
 
   async evaluateCustomerProfiles() {
@@ -356,6 +543,21 @@ export class APIClient {
 
   async createContractAttachment(contractId: number, payload: Partial<ContractAttachment> & Pick<ContractAttachment, "fileName">) {
     return this.request<ContractAttachment>(`/contracts/${contractId}/attachments`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async contractAttachments(contractId: number) {
+    return this.request<ContractAttachment[]>(`/contracts/${contractId}/attachments`);
+  }
+
+  async contracts() {
+    return this.request<Contract[]>("/contracts");
+  }
+
+  async createContract(payload: Partial<Contract> & Pick<Contract, "customerId" | "projectId" | "name" | "items">) {
+    return this.request<Contract>("/contracts", {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -489,6 +691,38 @@ export class APIClient {
     return this.request<DeliverySign[]>("/delivery/sign");
   }
 
+  async deliveryNotes() {
+    return this.request<DeliveryNote[]>("/delivery/notes");
+  }
+
+  async createDeliveryNote(payload: { dispatchId: number; ticketId?: number; status?: string }) {
+    return this.request<DeliveryNote>("/delivery/notes", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async updateDeliveryNoteStatus(id: number, status: string) {
+    return this.request<DeliveryNote>(`/delivery/notes/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status })
+    });
+  }
+
+  async createDeliveryNoteSignLink(id: number, payload: { channel: string; phone?: string; expiresAt?: string }) {
+    return this.request<DeliverySignLink>(`/delivery/notes/${id}/sign-link`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async reprintDeliveryNote(id: number) {
+    return this.request<DeliveryNote>(`/delivery/notes/${id}/reprint`, {
+      method: "POST",
+      body: "{}"
+    });
+  }
+
   async signDelivery(payload: Partial<DeliverySign> & { attachments?: Partial<DeliverySignAttachment>[] }) {
     return this.request<DeliverySign>("/delivery/sign", {
       method: "POST",
@@ -543,7 +777,11 @@ export class APIClient {
   }
 
   async trackReplay(vehicleId: number) {
-    return this.request<TrackReplay>(`/vehicle/track/replay?vehicleId=${vehicleId}`);
+    return this.request<TrackReplay>(`/vehicle/track/replay?vehicleId=${encodeURIComponent(String(vehicleId))}`);
+  }
+
+  async vehicleTrack(params: { vehicleId?: number; startTime?: string; endTime?: string } = {}) {
+    return this.request<VehicleLocationEvent[]>(`/vehicle/track${querySuffix(params)}`);
   }
 
   async alarms() {
@@ -614,12 +852,67 @@ export class APIClient {
     return this.request<InventoryStocktake>(`/procurement/stocktakes/${id}/review`, { method: "POST" });
   }
 
+  async createStockYardReceipt(payload: { pileId?: number; pileCode?: string; materialId?: number; supplierId?: number; batchNo?: string; quantity: number; unit?: string; moistureRate?: number; qualityStatus?: string; remark?: string }) {
+    return this.request<StockYardFlow>("/procurement/yard-receipts", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createStockYardAdjustment(payload: { pileId?: number; pileCode?: string; actualQty: number; moistureRate?: number; qualityStatus?: string; status?: string; remark?: string }) {
+    return this.request<StockYardFlow | WorkflowInstance>("/procurement/yard-adjustments", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
   async productionOverview() {
     return this.request<ProductionOverview>("/production-plans/overview");
   }
 
+  async createPlantBufferTransfer(payload: { bufferId?: number; bufferCode?: string; yardPileId?: number; yardPileCode?: string; materialId?: number; quantity: number; unit?: string; remark?: string }) {
+    return this.request<PlantBufferFlow>("/production-plans/buffer-transfers", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createPlantBufferAdjustment(payload: { bufferId?: number; bufferCode?: string; actualQty: number; moistureRate?: number; qualityStatus?: string; status?: string; remark?: string }) {
+    return this.request<PlantBufferFlow | WorkflowInstance>("/production-plans/buffer-adjustments", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createProductionPlan(payload: Partial<ProductionPlan>) {
+    return this.request<ProductionPlan>("/production-plans", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async updateProductionPlan(planId: number, payload: Partial<ProductionPlan>) {
+    return this.request<ProductionPlan>(`/production-plans/${planId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async cancelProductionPlan(planId: number) {
+    return this.request<ProductionPlan>(`/production-plans/${planId}/cancel`, {
+      method: "POST"
+    });
+  }
+
   async createProductionTask(planId: number, payload: Partial<ProductionTask> = {}) {
     return this.request<ProductionTask>(`/production-plans/${planId}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async autoCreateProductionTasks(planId: number, payload: { taskQty?: number } = {}) {
+    return this.request<ProductionTask[]>(`/production-plans/${planId}/tasks/auto`, {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -670,6 +963,24 @@ export class APIClient {
 
   async retireLaboratoryMixDesign(id: number) {
     return this.request<MixDesign>(`/laboratory/mix-designs/${id}/retire`, { method: "POST", body: "{}" });
+  }
+
+  async createMixDesignPlantProfile(mixDesignId: number, payload: Partial<MixDesignPlantProfile> & Pick<MixDesignPlantProfile, "plantId" | "materials">) {
+    return this.request<MixDesignPlantProfile>(`/laboratory/mix-designs/${mixDesignId}/plant-profiles`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async approveMixDesignPlantProfile(id: number, payload: { effectiveFrom?: string; effectiveTo?: string } = {}) {
+    return this.request<MixDesignPlantProfile>(`/laboratory/mix-design-plant-profiles/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async retireMixDesignPlantProfile(id: number) {
+    return this.request<MixDesignPlantProfile>(`/laboratory/mix-design-plant-profiles/${id}/retire`, { method: "POST", body: "{}" });
   }
 
   async createMixDesignTrialRun(id: number, payload: Partial<MixDesignTrialRun>) {
@@ -750,7 +1061,7 @@ export class APIClient {
   }
 
   async reviewRawMaterialInspection(id: number, payload: Partial<RawMaterialInspection>) {
-    return this.request<RawMaterialInspection>(`/quality/raw-inspections/${id}/review`, {
+    return this.request<RawMaterialInspection | WorkflowInstance>(`/quality/raw-inspections/${id}/review`, {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -795,6 +1106,13 @@ export class APIClient {
 
   async createReceipt(payload: Partial<Receipt> & Pick<Receipt, "receivableId" | "amount">) {
     return this.request<Receipt>("/finance/receipts", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createPayment(payload: Partial<Payment> & Pick<Payment, "payableId" | "amount">) {
+    return this.request<Payment>("/finance/payments", {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -857,6 +1175,24 @@ export class APIClient {
     return this.request<RuleOverview>("/rules");
   }
 
+  async saveRuleDefinition(payload: Partial<RuleDefinition> & Pick<RuleDefinition, "code" | "name" | "metric">) {
+    return this.request<RuleDefinition>("/rules/definitions", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async setRuleDefinitionStatus(id: number, enabled: boolean) {
+    return this.request<RuleDefinition>(`/rules/definitions/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ enabled })
+    });
+  }
+
+  async deleteRuleDefinition(id: number) {
+    return this.request<RuleDefinition>(`/rules/definitions/${id}`, { method: "DELETE" });
+  }
+
   async evaluateRules() {
     return this.request("/rules/evaluate", { method: "POST" });
   }
@@ -872,6 +1208,24 @@ export class APIClient {
     return this.request<IntegrationOverview>("/integrations/overview");
   }
 
+  async saveIntegrationEndpoint(payload: Partial<IntegrationEndpoint> & Pick<IntegrationEndpoint, "name" | "type">) {
+    return this.request<IntegrationEndpoint>("/integrations/endpoints", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async setIntegrationEndpointStatus(id: number, status: string) {
+    return this.request<IntegrationEndpoint>(`/integrations/endpoints/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status })
+    });
+  }
+
+  async deleteIntegrationEndpoint(id: number) {
+    return this.request<IntegrationEndpoint>(`/integrations/endpoints/${id}`, { method: "DELETE" });
+  }
+
   async approvals() {
     return this.request<ApprovalTask[]>("/approvals");
   }
@@ -884,7 +1238,7 @@ export class APIClient {
   }
 
   async systemBundle(): Promise<SystemBundle> {
-    const [plugins, pluginRuns, updates, licenseVerified, licensePackages, licenseIssues, licenseRevocations, licensePortal, security, runtime, backups, backupDrills, approvalFlows, dictionaries] = await Promise.all([
+    const [plugins, pluginRuns, updates, licenseVerified, licensePackages, licenseIssues, licenseRevocations, licensePortal, security, runtime, backups, backupDrills, gateway, approvalFlows, workflows, dictionaries] = await Promise.all([
       this.request<PluginInfo[]>("/system/plugins"),
       this.request<PluginRun[]>("/system/plugins/runs"),
       this.request<UpdatePackage[]>("/system/updates"),
@@ -897,10 +1251,103 @@ export class APIClient {
       this.request<SystemBundle["runtime"]>("/system/runtime"),
       this.request<SystemBundle["backups"]>("/system/backups"),
       this.request<BackupDrill[]>("/system/backups/drills"),
+      this.request<GatewayOverview>("/system/gateway"),
       this.request<ApprovalFlow[]>("/system/approval-flows"),
+      this.request<WorkflowOverview>("/system/workflows"),
       this.request<DataDictionary[]>("/system/dictionaries")
     ]);
-    return { plugins, pluginRuns, updates, licenseVerified, licensePackages, licenseIssues, licenseRevocations, licensePortal, security, runtime, backups, backupDrills, approvalFlows, dictionaries };
+    return { plugins, pluginRuns, updates, licenseVerified, licensePackages, licenseIssues, licenseRevocations, licensePortal, security, runtime, backups, backupDrills, gateway, approvalFlows, workflows, dictionaries };
+  }
+
+  async systemModules() {
+    return this.request<ModuleInfo[]>("/system/modules");
+  }
+
+  async setSystemModuleEnabled(code: string, enabled: boolean) {
+    return this.request<ModuleInfo>(`/system/modules/${encodeURIComponent(code)}`, {
+      method: "POST",
+      body: JSON.stringify({ enabled })
+    });
+  }
+
+  async workflowOverview() {
+    return this.request<WorkflowOverview>("/system/workflows");
+  }
+
+  async workflowCatalog() {
+    return this.request<WorkflowCatalog>("/system/workflows/catalog");
+  }
+
+  async workflowInbox() {
+    return this.request<WorkflowInboxItem[]>("/system/workflows/inbox");
+  }
+
+  async workflowInstances(params: WorkflowInstanceQuery = {}) {
+    return this.request<WorkflowInstance[]>(`/system/workflows/instances${querySuffix(params)}`);
+  }
+
+  async workflowTasks(params: WorkflowTaskQuery = {}) {
+    return this.request<WorkflowTask[]>(`/system/workflows/tasks${querySuffix(params)}`);
+  }
+
+  async workflowLogs(params: WorkflowLogQuery = {}) {
+    return this.request<WorkflowLog[]>(`/system/workflows/logs${querySuffix(params)}`);
+  }
+
+  async systemUsers() {
+    return this.request<User[]>("/system/users");
+  }
+
+  async systemDictionaries() {
+    return this.request<DataDictionary[]>("/system/dictionaries");
+  }
+
+  async auditLogs() {
+    return this.request<AuditLog[]>("/system/audit");
+  }
+
+  async saveMenuLabel(payload: { key: string; label: string }) {
+    return this.request<Record<string, string>>("/system/menu-labels", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async resetMenuLabel(key: string) {
+    return this.request<Record<string, string>>(`/system/menu-labels/${encodeURIComponent(key)}`, { method: "DELETE" });
+  }
+
+  async orgOverview() {
+    return this.request<OrganizationOverview>("/system/org");
+  }
+
+  async saveSystemUser(payload: Partial<User> & { password?: string; username: string; displayName: string; roleCode: string }) {
+    return this.request<User>("/system/users", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async setSystemUserStatus(id: number, status: string) {
+    return this.request<User>(`/system/users/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status })
+    });
+  }
+
+  async systemRoles() {
+    return this.request<Role[]>("/system/roles");
+  }
+
+  async saveSystemRole(payload: Partial<Role> & { code: string; name: string }) {
+    return this.request<Role>("/system/roles", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async deleteSystemRole(id: number) {
+    return this.request<Role>(`/system/roles/${id}`, { method: "DELETE" });
   }
 
   async saveApprovalFlow(payload: Partial<ApprovalFlow>) {
@@ -917,6 +1364,195 @@ export class APIClient {
     });
   }
 
+  async deleteApprovalFlow(id: number) {
+    return this.request<ApprovalFlow>(`/system/approval-flows/${id}`, { method: "DELETE" });
+  }
+
+  async saveWorkflowDefinition(payload: Partial<WorkflowDefinition>) {
+    return this.request<WorkflowDefinition>("/system/workflows/definitions", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async publishWorkflowDefinitionVersion(id: number, payload: Partial<WorkflowDefinition>) {
+    return this.request<WorkflowDefinition>(`/system/workflows/definitions/${id}/publish`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async rollbackWorkflowDefinitionVersion(id: number) {
+    return this.request<WorkflowDefinition>(`/system/workflows/definitions/${id}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async saveWorkflowSubscription(payload: Partial<WorkflowSubscription>) {
+    return this.request<WorkflowSubscription>("/system/workflows/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async setWorkflowSubscriptionStatus(id: number, status: string) {
+    return this.request<WorkflowSubscription>(`/system/workflows/subscriptions/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status })
+    });
+  }
+
+  async deleteWorkflowSubscription(id: number) {
+    return this.request<WorkflowSubscription>(`/system/workflows/subscriptions/${id}`, { method: "DELETE" });
+  }
+
+  async workflowEvents(params: WorkflowEventQuery = {}) {
+    return this.request<WorkflowEvent[]>(`/system/workflows/events${querySuffix(params)}`);
+  }
+
+  async workflowOutbox(params: WorkflowOutboxQuery = {}) {
+    return this.request<WorkflowOutbox[]>(`/system/workflows/outbox${querySuffix(params)}`);
+  }
+
+  async workflowDeliveries(params: WorkflowDeliveryQuery = {}) {
+    return this.request<WorkflowDelivery[]>(`/system/workflows/deliveries${querySuffix(params)}`);
+  }
+
+  async publishWorkflowEvent(payload: {
+    eventType: string;
+    source?: string;
+    eventKey?: string;
+    actor?: string;
+    resource: string;
+    resourceId?: number;
+    resourceNo?: string;
+    title?: string;
+    reason?: string;
+    variables?: Record<string, string>;
+  }) {
+    return this.request<WorkflowEvent>("/system/workflows/events", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async previewWorkflowEvent(payload: {
+    eventType: string;
+    source?: string;
+    eventKey?: string;
+    actor?: string;
+    resource: string;
+    resourceId?: number;
+    resourceNo?: string;
+    title?: string;
+    reason?: string;
+    variables?: Record<string, string>;
+  }) {
+    return this.request<WorkflowEventPreview>("/system/workflows/events/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async replayWorkflowEvent(id: number) {
+    return this.request<WorkflowEvent>(`/system/workflows/events/${id}/replay`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async cancelWorkflowInstance(id: number, reason: string) {
+    return this.request<WorkflowInstance>(`/system/workflows/instances/${id}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    });
+  }
+
+  async actWorkflowTask(id: number, action: "approve" | "reject", comment: string) {
+    return this.request<WorkflowInstance>(`/system/workflows/tasks/${id}/act`, {
+      method: "POST",
+      body: JSON.stringify({ action, comment })
+    });
+  }
+
+  async reassignWorkflowTask(id: number, roleCode: string, reason: string) {
+    return this.request<WorkflowInstance>(`/system/workflows/tasks/${id}/reassign`, {
+      method: "POST",
+      body: JSON.stringify({ roleCode, reason })
+    });
+  }
+
+  async escalateWorkflowTask(id: number, roleCode: string, reason: string) {
+    return this.request<WorkflowInstance>(`/system/workflows/tasks/${id}/escalate`, {
+      method: "POST",
+      body: JSON.stringify({ roleCode, reason })
+    });
+  }
+
+  async acknowledgeWorkflowOutbox(id: number) {
+    return this.request<WorkflowOutbox>(`/system/workflows/outbox/${id}/ack`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async claimWorkflowOutbox(id: number, consumer = "erp-console") {
+    return this.request<WorkflowOutbox>(`/system/workflows/outbox/${id}/claim`, {
+      method: "POST",
+      body: JSON.stringify({ consumer })
+    });
+  }
+
+  async failWorkflowOutbox(id: number, error = "投递失败", retryAfterMinutes = 5) {
+    return this.request<WorkflowOutbox>(`/system/workflows/outbox/${id}/fail`, {
+      method: "POST",
+      body: JSON.stringify({ error, retryAfterMinutes })
+    });
+  }
+
+  async dispatchWorkflowDelivery(id: number) {
+    return this.request<WorkflowDelivery>(`/system/workflows/deliveries/${id}/dispatch`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async resetWorkflowDelivery(id: number) {
+    return this.request<WorkflowDelivery>(`/system/workflows/deliveries/${id}/reset`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async dispatchDueWorkflowDeliveries(limit = 20) {
+    return this.request<WorkflowDeliveryDispatchBatch>(`/system/workflows/deliveries/dispatch-due?limit=${encodeURIComponent(String(limit))}`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async runWorkflowAutomation(deliveryLimit = 20, escalationLimit = 20) {
+    return this.request<WorkflowAutomationRun>(`/system/workflows/automation/run?deliveryLimit=${encodeURIComponent(String(deliveryLimit))}&escalationLimit=${encodeURIComponent(String(escalationLimit))}`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async resetWorkflowOutbox(id: number) {
+    return this.request<WorkflowOutbox>(`/system/workflows/outbox/${id}/reset`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }
+
+  async resolveWorkflowEvent(id: number, resolution: string) {
+    return this.request<WorkflowEvent>(`/system/workflows/events/${id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ resolution })
+    });
+  }
+
   async saveDictionary(payload: Partial<DataDictionary>) {
     return this.request<DataDictionary>("/system/dictionaries", {
       method: "POST",
@@ -929,6 +1565,10 @@ export class APIClient {
       method: "POST",
       body: JSON.stringify({ status })
     });
+  }
+
+  async deleteDictionary(id: number) {
+    return this.request<DataDictionary>(`/system/dictionaries/${id}`, { method: "DELETE" });
   }
 
   async mapConfig() {
@@ -1040,6 +1680,12 @@ export class APIClient {
     });
   }
 
+  async deleteGatewayRoute(id: number) {
+    return this.request<GatewayRoute>(`/system/gateway/routes/${id}`, {
+      method: "DELETE"
+    });
+  }
+
   async reloadGateway() {
     return this.request<GatewayOverview["reloadPlan"]>("/system/gateway/reload", { method: "POST" });
   }
@@ -1073,6 +1719,10 @@ export class APIClient {
     });
   }
 
+  async deleteSSOProvider(id: number) {
+    return this.request<OIDCProvider>(`/system/sso/providers/${id}`, { method: "DELETE" });
+  }
+
   async saveSCIMProvider(payload: Partial<SCIMProvider>) {
     return this.request<SCIMProvider>("/system/scim/providers", {
       method: "POST",
@@ -1087,11 +1737,62 @@ export class APIClient {
     });
   }
 
+  async deleteSCIMProvider(id: number) {
+    return this.request<SCIMProvider>(`/system/scim/providers/${id}`, { method: "DELETE" });
+  }
+
+  async saveSecurityPolicy(payload: Partial<SecurityPolicy> & Pick<SecurityPolicy, "name" | "type">) {
+    return this.request<SecurityPolicy>("/system/security/policies", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async toggleSecurityPolicy(id: number, enabled: boolean) {
+    return this.request<SecurityPolicy>(`/system/security/policies/${id}/toggle`, {
+      method: "POST",
+      body: JSON.stringify({ enabled })
+    });
+  }
+
+  async deleteSecurityPolicy(id: number) {
+    return this.request<SecurityPolicy>(`/system/security/policies/${id}`, { method: "DELETE" });
+  }
+
+  async saveDeviceCredential(payload: Partial<DeviceCredential> & Pick<DeviceCredential, "deviceNo"> & { deviceKey?: string }) {
+    return this.request<DeviceCredential>("/system/security/device-credentials", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async setDeviceCredentialStatus(id: number, status: string) {
+    return this.request<DeviceCredential>(`/system/security/device-credentials/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status })
+    });
+  }
+
+  async deleteDeviceCredential(id: number) {
+    return this.request<DeviceCredential>(`/system/security/device-credentials/${id}`, { method: "DELETE" });
+  }
+
   async createFieldPolicy(payload: Partial<FieldPolicy> & Pick<FieldPolicy, "roleCode" | "resource" | "field">) {
     return this.request<FieldPolicy>("/system/field-policies", {
       method: "POST",
       body: JSON.stringify(payload)
     });
+  }
+
+  async updateFieldPolicy(id: number, payload: Partial<FieldPolicy> & Pick<FieldPolicy, "roleCode" | "resource" | "field">) {
+    return this.request<FieldPolicy>(`/system/field-policies/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async deleteFieldPolicy(id: number) {
+    return this.request<FieldPolicy>(`/system/field-policies/${id}`, { method: "DELETE" });
   }
 
   async toggleFieldPolicy(id: number, enabled: boolean) {
@@ -1108,8 +1809,19 @@ export class APIClient {
     });
   }
 
+  async verifyPlugin(pluginId: string) {
+    return this.request<{ plugin: PluginInfo; valid: boolean }>(`/system/plugins/${encodeURIComponent(pluginId)}/verify`, { method: "POST" });
+  }
+
+  async setPluginStatus(pluginId: string, status: string) {
+    return this.request<PluginInfo>(`/system/plugins/${encodeURIComponent(pluginId)}`, {
+      method: "POST",
+      body: JSON.stringify({ status })
+    });
+  }
+
   async runPlugin(pluginId: string, payload: { action?: string; permission: string; input: Record<string, unknown> }) {
-    return this.request<PluginRun>(`/system/plugins/${pluginId}/run`, {
+    return this.request<PluginRun>(`/system/plugins/${encodeURIComponent(pluginId)}/run`, {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -1134,17 +1846,13 @@ export class APIClient {
     return this.request<UpdatePackageDownload>(`/system/updates/${id}/download`);
   }
 
-  async simulateTick() {
-    return this.request("/simulate/tick", { method: "POST" });
-  }
-
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const headers = new Headers(options.headers || {});
     headers.set("Content-Type", "application/json");
     if (!options.anonymous && this.token) {
       headers.set("Authorization", `Bearer ${this.token}`);
     }
-    const response = await fetch(`${API_ROOT}${path}`, {
+    const response = await fetch(`${getAPIBaseURL()}${path}`, {
       ...options,
       headers,
       credentials: "include"
@@ -1158,4 +1866,4 @@ export class APIClient {
 }
 
 export const api = new APIClient();
-export const eventURL = () => `${API_ROOT}/events?token=${encodeURIComponent(api.token)}`;
+export const eventURL = () => `${getAPIBaseURL()}/events?token=${encodeURIComponent(api.token)}`;

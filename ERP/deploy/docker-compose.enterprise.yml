@@ -19,15 +19,26 @@ services:
     environment:
       CBMP_ADDR: 0.0.0.0:8088
       CBMP_DATA: /data/app.vault
-      CBMP_DATA_KEY: ${CBMP_DATA_KEY:-change-me-before-production}
+      CBMP_DATA_KEY: ${CBMP_DATA_KEY:?set CBMP_DATA_KEY in ERP/deploy/.env}
+      CBMP_INITIAL_ADMIN_PASSWORD: ${CBMP_INITIAL_ADMIN_PASSWORD:?set CBMP_INITIAL_ADMIN_PASSWORD in ERP/deploy/.env}
+      CBMP_PUBLIC_BASE_URL: ${CBMP_PUBLIC_BASE_URL:-http://localhost:8080}
       CBMP_BACKUP_DIR: /data/backups
+      CBMP_BACKUP_KEY: ${CBMP_BACKUP_KEY:-}
       CBMP_ENFORCE_IP_WHITELIST: ${CBMP_ENFORCE_IP_WHITELIST:-0}
-      CBMP_POSTGRES_DSN: postgres://cbmp:cbmp@postgres:5432/cbmp?sslmode=disable
-      CBMP_REDIS_ADDR: redis:6379
-      CBMP_RABBITMQ_URL: amqp://cbmp:cbmp@rabbitmq:5672/
-      CBMP_MINIO_ENDPOINT: minio:9000
-      CBMP_CLICKHOUSE_DSN: tcp://clickhouse:9000
-      CBMP_CLICKHOUSE_HTTP_URL: http://clickhouse:8123
+      CBMP_POSTGRES_DSN: ${CBMP_POSTGRES_DSN:?set CBMP_POSTGRES_DSN in ERP/deploy/.env}
+      CBMP_POSTGRES_LOAD_FROM_DOMAIN: ${CBMP_POSTGRES_LOAD_FROM_DOMAIN:-0}
+      CBMP_REDIS_ADDR: ${CBMP_REDIS_ADDR:-redis:6379}
+      CBMP_RABBITMQ_URL: ${CBMP_RABBITMQ_URL:-}
+      CBMP_CLICKHOUSE_HTTP_URL: ${CBMP_CLICKHOUSE_HTTP_URL:-http://clickhouse:8123}
+      CBMP_UPDATE_SIGNING_SECRET: ${CBMP_UPDATE_SIGNING_SECRET:-}
+      CBMP_COLLECTION_CALLBACK_SECRET: ${CBMP_COLLECTION_CALLBACK_SECRET:-}
+      CBMP_TAX_GATEWAY_URL: ${CBMP_TAX_GATEWAY_URL:-}
+      CBMP_TAX_GATEWAY_PROVIDER: ${CBMP_TAX_GATEWAY_PROVIDER:-}
+      CBMP_TAX_GATEWAY_TOKEN: ${CBMP_TAX_GATEWAY_TOKEN:-}
+      CBMP_TAX_GATEWAY_SECRET: ${CBMP_TAX_GATEWAY_SECRET:-}
+      CBMP_MAP_PROVIDER: ${CBMP_MAP_PROVIDER:-}
+      CBMP_MAP_TILE_URL: ${CBMP_MAP_TILE_URL:-}
+      CBMP_MAP_API_KEY: ${CBMP_MAP_API_KEY:-}
     volumes:
       - cbmp_data:/data
     depends_on:
@@ -69,9 +80,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: cbmp
-      POSTGRES_USER: cbmp
-      POSTGRES_PASSWORD: cbmp
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in ERP/deploy/.env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in ERP/deploy/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in ERP/deploy/.env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -98,8 +109,8 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     environment:
-      RABBITMQ_DEFAULT_USER: cbmp
-      RABBITMQ_DEFAULT_PASS: cbmp
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-cbmp}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set RABBITMQ_DEFAULT_PASS in ERP/deploy/.env}
     ports:
       - "15672:15672"
     volumes:
@@ -116,8 +127,8 @@ services:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: cbmpadmin
-      MINIO_ROOT_PASSWORD: cbmpadmin123
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cbmpadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in ERP/deploy/.env}
     ports:
       - "9001:9001"
     volumes:

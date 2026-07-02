@@ -49,6 +49,7 @@
 - 明确不属于 ERP：
   - `/api/product-ops/*`
   - 客户实例运营、授权续费运营、客户现场探针、内部告警治理、第三方监控接入、更新包灰度和端内更新任务编排属于 `OperationsPlatform/`。
+  - ERP 默认构建不编译 `ERP/backend/internal/appliance/product_*.go` 的历史运营台处理器；这些文件仅保留在 `legacy_product_ops` build tag 下作为迁移期源码。
 
 ## 2. Operations 平台（`OperationsPlatform/backend/`）
 
@@ -57,7 +58,10 @@
 - 概览：`GET /api/summary`
 - 客户：
   - `GET /api/customers`
+  - `POST /api/customers`
   - `POST /api/customers/{id}/renewals`
+  - `GET /api/renewals`
+  - `GET /api/renewals/{id}/license-package`
 - 告警：
   - `GET /api/alerts`
   - `POST /api/alerts/{id}/ack`

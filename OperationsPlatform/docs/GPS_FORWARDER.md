@@ -57,7 +57,7 @@ backend/internal/gpsforwarder
 export GPSF_HTTP_TARGETS="http://127.0.0.1:8088/api/iot/protocols/gps/ingest"
 export GPSF_FORWARD_MODE="protocol-frame"
 export GPSF_PROTOCOL="gps-json"
-export GPSF_DEVICE_KEY="device-demo-key-2"
+export GPSF_DEVICE_KEY="replace-with-erp-device-key"
 ```
 
 ## 示例

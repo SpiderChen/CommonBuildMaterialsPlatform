@@ -36,6 +36,37 @@ func (a *App) updateMasterResource(w http.ResponseWriter, r *http.Request, sessi
 			return fmt.Errorf("客户不存在")
 		})
 		a.respondUpdate(w, err, updated, "master.customer.updated")
+	case "customer-contacts":
+		var item CustomerContact
+		if err := readJSON(r, &item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid customer contact")
+			return
+		}
+		var updated CustomerContact
+		err := a.store.Mutate(func(data *AppData) error {
+			index := customerContactIndex(*data, id)
+			if index < 0 {
+				return fmt.Errorf("客户联系人不存在")
+			}
+			current := data.CustomerContacts[index]
+			oldCustomerID := current.CustomerID
+			item.ID = id
+			if err := normalizeCustomerContact(*data, &item, &current); err != nil {
+				return err
+			}
+			if item.IsDefault {
+				clearDefaultCustomerContact(data, item.CustomerID)
+			}
+			data.CustomerContacts[index] = item
+			if oldCustomerID != item.CustomerID {
+				syncCustomerPrimaryContact(data, oldCustomerID)
+			}
+			syncCustomerPrimaryContact(data, item.CustomerID)
+			updated = data.CustomerContacts[index]
+			addAudit(data, session.User.Username, "update", "customer_contact", id, item.Name, clientIP(r))
+			return nil
+		})
+		a.respondUpdate(w, err, updated, "master.customer_contact.updated")
 	case "projects":
 		var item Project
 		if err := readJSON(r, &item); err != nil {
@@ -97,6 +128,54 @@ func (a *App) updateMasterResource(w http.ResponseWriter, r *http.Request, sessi
 			return fmt.Errorf("产品不存在")
 		})
 		a.respondUpdate(w, err, updated, "master.product.updated")
+	case "price-policies":
+		var item PricePolicy
+		if err := readJSON(r, &item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid price policy")
+			return
+		}
+		var updated PricePolicy
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.PricePolicies {
+				if data.PricePolicies[i].ID != id {
+					continue
+				}
+				item.ID = id
+				if err := normalizePricePolicy(*data, &item); err != nil {
+					return err
+				}
+				data.PricePolicies[i] = item
+				updated = item
+				addAudit(data, session.User.Username, "update", "price_policy", id, fmt.Sprintf("product=%d price=%.2f", item.ProductID, item.SalePrice), clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("价格政策不存在")
+		})
+		a.respondUpdate(w, err, updated, "master.price_policy.updated")
+	case "tax-rates":
+		var item TaxRate
+		if err := readJSON(r, &item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid tax rate")
+			return
+		}
+		var updated TaxRate
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.TaxRates {
+				if data.TaxRates[i].ID != id {
+					continue
+				}
+				item.ID = id
+				if err := normalizeTaxRate(&item); err != nil {
+					return err
+				}
+				data.TaxRates[i] = item
+				updated = item
+				addAudit(data, session.User.Username, "update", "tax_rate", id, item.Name, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("税率不存在")
+		})
+		a.respondUpdate(w, err, updated, "master.tax_rate.updated")
 	case "materials":
 		var item Material
 		if err := readJSON(r, &item); err != nil {
@@ -139,6 +218,9 @@ func (a *App) updateMasterResource(w http.ResponseWriter, r *http.Request, sessi
 				if !companyIDExists(data.Companies, item.CompanyID) {
 					return fmt.Errorf("公司不存在")
 				}
+				if !userCanManageCompany(*data, session.User, item.CompanyID) {
+					return fmt.Errorf("无权维护该公司站点")
+				}
 				if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Code) == "" {
 					return fmt.Errorf("站点名称和编码不能为空")
 				}
@@ -146,12 +228,81 @@ func (a *App) updateMasterResource(w http.ResponseWriter, r *http.Request, sessi
 				item.Status = fallback(item.Status, data.Sites[i].Status)
 				data.Sites[i] = item
 				updated = item
+				syncSiteGeoFence(data, item)
 				addAudit(data, session.User.Username, "update", "site", id, item.Name, clientIP(r))
 				return nil
 			}
 			return fmt.Errorf("站点不存在")
 		})
 		a.respondUpdate(w, err, updated, "master.site.updated")
+	case "plants":
+		var item Plant
+		if err := readJSON(r, &item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid plant")
+			return
+		}
+		var updated Plant
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.Plants {
+				if data.Plants[i].ID != id {
+					continue
+				}
+				current := data.Plants[i]
+				if item.SiteID == 0 {
+					item.SiteID = current.SiteID
+				}
+				var err error
+				item.SiteID, err = writableSiteID(*data, session.User, item.SiteID)
+				if err != nil {
+					return err
+				}
+				if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Code) == "" {
+					return fmt.Errorf("生产线名称和编码不能为空")
+				}
+				item.ID = id
+				item.Capacity = fallback(item.Capacity, current.Capacity)
+				item.Interface = ""
+				item.Status = fallback(item.Status, current.Status)
+				data.Plants[i] = item
+				updated = item
+				addAudit(data, session.User.Username, "update", "plant", id, item.Name, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("生产线不存在")
+		})
+		a.respondUpdate(w, err, updated, "master.plant.updated")
+	case "plant-buffer-locations":
+		a.updatePlantBufferLocation(w, r, session, id)
+	case "stock-yards":
+		a.updateStockYard(w, r, session, id)
+	case "stock-yard-piles":
+		a.updateStockYardPile(w, r, session, id)
+	case "carriers":
+		var item Carrier
+		if err := readJSON(r, &item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid carrier")
+			return
+		}
+		var updated Carrier
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.Carriers {
+				if data.Carriers[i].ID != id {
+					continue
+				}
+				if strings.TrimSpace(item.Name) == "" {
+					return fmt.Errorf("承运商名称不能为空")
+				}
+				item.ID = id
+				item.SettleMode = fallback(strings.TrimSpace(item.SettleMode), data.Carriers[i].SettleMode)
+				item.Status = fallback(strings.TrimSpace(item.Status), data.Carriers[i].Status)
+				data.Carriers[i] = item
+				updated = item
+				addAudit(data, session.User.Username, "update", "carrier", id, item.Name, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("承运商不存在")
+		})
+		a.respondUpdate(w, err, updated, "master.carrier.updated")
 	case "drivers":
 		var item Driver
 		if err := readJSON(r, &item); err != nil {
@@ -193,6 +344,7 @@ func (a *App) updateMasterResource(w http.ResponseWriter, r *http.Request, sessi
 					return fmt.Errorf("车牌号不能为空")
 				}
 				item.ID = id
+				item.InternalNo = fallback(item.InternalNo, data.Vehicles[i].InternalNo)
 				item.OnlineStatus = fallback(item.OnlineStatus, data.Vehicles[i].OnlineStatus)
 				item.BusinessStatus = fallback(item.BusinessStatus, data.Vehicles[i].BusinessStatus)
 				item.Status = fallback(item.Status, data.Vehicles[i].Status)
@@ -204,6 +356,46 @@ func (a *App) updateMasterResource(w http.ResponseWriter, r *http.Request, sessi
 			return fmt.Errorf("车辆不存在")
 		})
 		a.respondUpdate(w, err, updated, "master.vehicle.updated")
+	case "vehicle-devices":
+		item, err := readVehicleDevicePayload(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid vehicle device")
+			return
+		}
+		var updated VehicleDevice
+		err = a.store.Mutate(func(data *AppData) error {
+			for i := range data.VehicleDevices {
+				if data.VehicleDevices[i].ID != id {
+					continue
+				}
+				if strings.TrimSpace(item.DeviceNo) == "" {
+					return fmt.Errorf("设备号不能为空")
+				}
+				vehicle, ok := findVehicle(*data, item.VehicleID)
+				if !ok {
+					return fmt.Errorf("车辆不存在")
+				}
+				if _, err := writableSiteID(*data, session.User, vehicle.SiteID); err != nil {
+					return err
+				}
+				for _, existing := range data.VehicleDevices {
+					if existing.ID != id && existing.DeviceNo == item.DeviceNo {
+						return fmt.Errorf("设备号已绑定车辆")
+					}
+					if existing.ID != id && existing.VehicleID == item.VehicleID {
+						return fmt.Errorf("车辆已绑定定位设备")
+					}
+				}
+				item.ID = id
+				item.LastSeenAt = fallback(item.LastSeenAt, data.VehicleDevices[i].LastSeenAt)
+				data.VehicleDevices[i] = item
+				updated = item
+				addAudit(data, session.User.Username, "update", "vehicle_device", id, item.DeviceNo, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("定位设备不存在")
+		})
+		a.respondUpdate(w, err, updated, "master.vehicle_device.updated")
 	case "inventory":
 		var item InventoryItem
 		if err := readJSON(r, &item); err != nil {
@@ -266,6 +458,17 @@ func (a *App) deleteMasterResource(w http.ResponseWriter, r *http.Request, sessi
 				}
 			}
 			return fmt.Errorf("客户不存在")
+		case "customer-contacts":
+			for i, item := range data.CustomerContacts {
+				if item.ID == id {
+					deleted = item
+					data.CustomerContacts = append(data.CustomerContacts[:i], data.CustomerContacts[i+1:]...)
+					syncCustomerPrimaryContact(data, item.CustomerID)
+					addAudit(data, session.User.Username, "delete", "customer_contact", id, item.Name, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("客户联系人不存在")
 		case "projects":
 			for i, item := range data.Projects {
 				if item.ID == id {
@@ -286,6 +489,26 @@ func (a *App) deleteMasterResource(w http.ResponseWriter, r *http.Request, sessi
 				}
 			}
 			return fmt.Errorf("产品不存在")
+		case "price-policies":
+			for i, item := range data.PricePolicies {
+				if item.ID == id {
+					deleted = item
+					data.PricePolicies = append(data.PricePolicies[:i], data.PricePolicies[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "price_policy", id, fmt.Sprintf("product=%d price=%.2f", item.ProductID, item.SalePrice), clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("价格政策不存在")
+		case "tax-rates":
+			for i, item := range data.TaxRates {
+				if item.ID == id {
+					deleted = item
+					data.TaxRates = append(data.TaxRates[:i], data.TaxRates[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "tax_rate", id, item.Name, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("税率不存在")
 		case "materials":
 			for i, item := range data.Materials {
 				if item.ID == id {
@@ -301,11 +524,83 @@ func (a *App) deleteMasterResource(w http.ResponseWriter, r *http.Request, sessi
 				if item.ID == id {
 					deleted = item
 					data.Sites = append(data.Sites[:i], data.Sites[i+1:]...)
+					archiveSiteGeoFences(data, id)
 					addAudit(data, session.User.Username, "delete", "site", id, item.Name, clientIP(r))
 					return nil
 				}
 			}
 			return fmt.Errorf("站点不存在")
+		case "plants":
+			for i, item := range data.Plants {
+				if item.ID == id {
+					deleted = item
+					data.Plants = append(data.Plants[:i], data.Plants[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "plant", id, item.Name, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("生产线不存在")
+		case "plant-buffer-locations":
+			for _, item := range data.PlantBufferFlows {
+				if item.BufferID == id {
+					return fmt.Errorf("暂存仓位已有流水，不能删除")
+				}
+			}
+			for i, item := range data.PlantBufferLocations {
+				if item.ID == id {
+					if item.CurrentQty != 0 {
+						return fmt.Errorf("暂存仓位有余额，不能删除")
+					}
+					deleted = item
+					data.PlantBufferLocations = append(data.PlantBufferLocations[:i], data.PlantBufferLocations[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "plant_buffer", id, item.Code, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("暂存仓位不存在")
+		case "stock-yards":
+			for _, item := range data.StockYardPiles {
+				if item.YardID == id {
+					return fmt.Errorf("堆场下已有堆位，不能删除")
+				}
+			}
+			for i, item := range data.StockYards {
+				if item.ID == id {
+					deleted = item
+					data.StockYards = append(data.StockYards[:i], data.StockYards[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "stock_yard", id, item.Code, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("堆场不存在")
+		case "stock-yard-piles":
+			for _, item := range data.StockYardFlows {
+				if item.PileID == id {
+					return fmt.Errorf("堆位已有流水，不能删除")
+				}
+			}
+			for i, item := range data.StockYardPiles {
+				if item.ID == id {
+					if item.CurrentQty != 0 {
+						return fmt.Errorf("堆位有余额，不能删除")
+					}
+					deleted = item
+					data.StockYardPiles = append(data.StockYardPiles[:i], data.StockYardPiles[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "stock_yard_pile", id, item.Code, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("堆位不存在")
+		case "carriers":
+			for i, item := range data.Carriers {
+				if item.ID == id {
+					deleted = item
+					data.Carriers = append(data.Carriers[:i], data.Carriers[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "carrier", id, item.Name, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("承运商不存在")
 		case "drivers":
 			for i, item := range data.Drivers {
 				if item.ID == id {
@@ -321,11 +616,34 @@ func (a *App) deleteMasterResource(w http.ResponseWriter, r *http.Request, sessi
 				if item.ID == id {
 					deleted = item
 					data.Vehicles = append(data.Vehicles[:i], data.Vehicles[i+1:]...)
+					devices := data.VehicleDevices[:0]
+					for _, device := range data.VehicleDevices {
+						if device.VehicleID != id {
+							devices = append(devices, device)
+						}
+					}
+					data.VehicleDevices = devices
 					addAudit(data, session.User.Username, "delete", "vehicle", id, item.PlateNo, clientIP(r))
 					return nil
 				}
 			}
 			return fmt.Errorf("车辆不存在")
+		case "vehicle-devices":
+			for i, item := range data.VehicleDevices {
+				if item.ID == id {
+					vehicle, ok := findVehicle(*data, item.VehicleID)
+					if ok {
+						if _, err := writableSiteID(*data, session.User, vehicle.SiteID); err != nil {
+							return err
+						}
+					}
+					deleted = item
+					data.VehicleDevices = append(data.VehicleDevices[:i], data.VehicleDevices[i+1:]...)
+					addAudit(data, session.User.Username, "delete", "vehicle_device", id, item.DeviceNo, clientIP(r))
+					return nil
+				}
+			}
+			return fmt.Errorf("定位设备不存在")
 		case "inventory":
 			for i, item := range data.Inventory {
 				if item.ID == id {
@@ -419,6 +737,12 @@ func masterResourceReferenced(data AppData, resource string, id int64) bool {
 				return true
 			}
 		}
+	case "tax-rates":
+		for _, item := range data.PricePolicies {
+			if item.TaxRateID == id {
+				return true
+			}
+		}
 	case "materials":
 		for _, item := range data.Inventory {
 			if item.MaterialID == id {
@@ -431,6 +755,11 @@ func masterResourceReferenced(data AppData, resource string, id int64) bool {
 			}
 		}
 		for _, item := range data.RawMaterialReceipts {
+			if item.MaterialID == id {
+				return true
+			}
+		}
+		for _, item := range data.StockYardPiles {
 			if item.MaterialID == id {
 				return true
 			}
@@ -448,6 +777,11 @@ func masterResourceReferenced(data AppData, resource string, id int64) bool {
 				return true
 			}
 		}
+		for _, item := range data.Plants {
+			if item.SiteID == id {
+				return true
+			}
+		}
 		for _, item := range data.Vehicles {
 			if item.SiteID == id {
 				return true
@@ -458,8 +792,60 @@ func masterResourceReferenced(data AppData, resource string, id int64) bool {
 				return true
 			}
 		}
+		for _, item := range data.PlantBufferLocations {
+			if item.SiteID == id {
+				return true
+			}
+		}
+		for _, item := range data.StockYards {
+			if item.SiteID == id {
+				return true
+			}
+		}
+		for _, item := range data.StockYardPiles {
+			if item.SiteID == id {
+				return true
+			}
+		}
 		for _, item := range data.DispatchOrders {
 			if item.SiteID == id {
+				return true
+			}
+		}
+	case "plants":
+		plantCode := ""
+		for _, item := range data.Plants {
+			if item.ID == id {
+				plantCode = item.Code
+				break
+			}
+		}
+		if plantCode == "" {
+			return false
+		}
+		for _, item := range data.ProductionBatches {
+			if item.PlantCode == plantCode {
+				return true
+			}
+		}
+		for _, item := range data.PlantBufferLocations {
+			if item.PlantID == id || item.PlantCode == plantCode {
+				return true
+			}
+		}
+	case "carriers":
+		for _, item := range data.DispatchSchedules {
+			if item.CarrierID == id {
+				return true
+			}
+		}
+		for _, item := range data.TransportSettlements {
+			if item.CarrierID == id {
+				return true
+			}
+		}
+		for _, item := range data.TransportSettlementItems {
+			if item.CarrierID == id {
 				return true
 			}
 		}

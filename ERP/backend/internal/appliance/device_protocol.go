@@ -35,6 +35,8 @@ type protocolIngestResponse struct {
 	Location        *VehicleLocationEvent `json:"location,omitempty"`
 	ScaleEvent      *ScaleDeviceEvent     `json:"scaleEvent,omitempty"`
 	ProductionBatch *ProductionBatch      `json:"productionBatch,omitempty"`
+	PlantBufferFlow *PlantBufferFlow      `json:"plantBufferFlow,omitempty"`
+	StockYardFlow   *StockYardFlow        `json:"stockYardFlow,omitempty"`
 }
 
 func (a *App) ingestGPSProtocolFrame(w http.ResponseWriter, r *http.Request, session Session) {

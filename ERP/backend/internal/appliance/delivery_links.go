@@ -101,6 +101,11 @@ func (a *App) addDeliverySignAttachment(w http.ResponseWriter, r *http.Request, 
 		if !ok {
 			return fmt.Errorf("签收单不存在")
 		}
+		normalized, err := normalizeDeliverySignAttachment(item)
+		if err != nil {
+			return err
+		}
+		item = normalized
 		item.SignID = sign.ID
 		item.DispatchID = sign.DispatchID
 		item.TicketID = sign.TicketID
@@ -189,6 +194,17 @@ func completeDeliverySign(data *AppData, item DeliverySign, attachments []Delive
 	if item.SignedQty > dispatch.PlanQuantity {
 		return DeliverySign{}, fmt.Errorf("签收数量不能大于派车数量")
 	}
+	if len(attachments) == 0 && strings.TrimSpace(item.Photo) != "" {
+		attachments = append(attachments, DeliverySignAttachment{FileName: "现场签收照片", FileType: "photo", URL: item.Photo})
+	}
+	normalizedAttachments := make([]DeliverySignAttachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		normalized, err := normalizeDeliverySignAttachment(attachment)
+		if err != nil {
+			return DeliverySign{}, err
+		}
+		normalizedAttachments = append(normalizedAttachments, normalized)
+	}
 	item.SignedAt = nowString()
 	data.DeliverySigns = append(data.DeliverySigns, item)
 	for i := range data.DispatchOrders {
@@ -216,10 +232,7 @@ func completeDeliverySign(data *AppData, item DeliverySign, attachments []Delive
 			data.DeliveryNotes[i].Status = "signed"
 		}
 	}
-	if len(attachments) == 0 && item.Photo != "" {
-		attachments = append(attachments, DeliverySignAttachment{FileName: "现场签收照片", FileType: "photo", URL: item.Photo})
-	}
-	for _, attachment := range attachments {
+	for _, attachment := range normalizedAttachments {
 		attachment.SignID = item.ID
 		attachment.DispatchID = item.DispatchID
 		attachment.TicketID = item.TicketID
@@ -227,8 +240,45 @@ func completeDeliverySign(data *AppData, item DeliverySign, attachments []Delive
 	}
 	updateVehicleStatus(data, dispatch.VehicleID, "returning")
 	upsertStatement(data, item, order)
+	if _, instances, err := publishDeliverySignCompletedWorkflow(data, item, actor); err != nil {
+		return DeliverySign{}, err
+	} else if len(instances) > 0 {
+		item.ReviewStatus = "pending_review"
+		for i := range data.DeliverySigns {
+			if data.DeliverySigns[i].ID == item.ID {
+				data.DeliverySigns[i].ReviewStatus = item.ReviewStatus
+				break
+			}
+		}
+	}
 	addAudit(data, actor, "create", "delivery_sign", item.ID, item.SignNo, ip)
 	return item, nil
+}
+
+func publishDeliverySignCompletedWorkflow(data *AppData, item DeliverySign, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "delivery_sign.completed",
+		Source:     "delivery",
+		Resource:   "delivery_sign",
+		ResourceID: item.ID,
+		ResourceNo: item.SignNo,
+		Title:      "送货签收 " + item.SignNo,
+		Actor:      actor,
+		Reason:     "送货签收完成",
+		Variables: map[string]string{
+			"dispatchId": fmt.Sprintf("%d", item.DispatchID),
+			"ticketId":   fmt.Sprintf("%d", item.TicketID),
+			"orderId":    fmt.Sprintf("%d", item.OrderID),
+			"lineId":     fmt.Sprintf("%d", item.LineID),
+			"lineSeq":    fmt.Sprintf("%d", item.LineSeq),
+			"productId":  fmt.Sprintf("%d", item.ProductID),
+			"customerId": fmt.Sprintf("%d", item.CustomerID),
+			"projectId":  fmt.Sprintf("%d", item.ProjectID),
+			"signedQty":  fmt.Sprintf("%.2f", item.SignedQty),
+			"signer":     item.Signer,
+			"signedAt":   item.SignedAt,
+		},
+	})
 }
 
 func buildDeliverySignLink(data *AppData, req deliverySignLinkRequest, actor string) (DeliverySignLink, error) {
@@ -323,11 +373,28 @@ func createDeliverySignAttachment(data *AppData, item DeliverySignAttachment, ac
 	return item
 }
 
+func normalizeDeliverySignAttachment(item DeliverySignAttachment) (DeliverySignAttachment, error) {
+	item.FileName = strings.TrimSpace(item.FileName)
+	item.FileType = fallback(strings.TrimSpace(item.FileType), "photo")
+	item.URL = strings.TrimSpace(item.URL)
+	item.Checksum = strings.TrimSpace(item.Checksum)
+	if item.FileName == "" || item.URL == "" {
+		return item, fmt.Errorf("签收附件名称和 URL 必填")
+	}
+	return item, nil
+}
+
 func upsertDeliveryNoteQRCode(data *AppData, link DeliverySignLink) {
 	for i := range data.DeliveryNotes {
 		if data.DeliveryNotes[i].DispatchID == link.DispatchID {
+			if link.TicketID != 0 {
+				data.DeliveryNotes[i].TicketID = link.TicketID
+			}
+			data.DeliveryNotes[i].OrderID = link.OrderID
 			data.DeliveryNotes[i].QRCode = link.QRCode
-			data.DeliveryNotes[i].Status = "pending"
+			if data.DeliveryNotes[i].Status != "signed" && data.DeliveryNotes[i].Status != "void" {
+				data.DeliveryNotes[i].Status = "pending"
+			}
 			return
 		}
 	}

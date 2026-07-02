@@ -13,7 +13,7 @@ func requiredPermission(parts []string, method string) string {
 	}
 	write := method != http.MethodGet
 	switch parts[0] {
-	case "me":
+	case "me", "account":
 		return ""
 	case "bootstrap":
 		return "bootstrap:read"
@@ -76,8 +76,11 @@ func requiredPermission(parts []string, method string) string {
 		}
 		return "ticket:read"
 	case "delivery":
-		if write {
+		if write && len(parts) > 1 && parts[1] == "sign" {
 			return "sign:create"
+		}
+		if write {
+			return "delivery:write"
 		}
 		return "delivery:read"
 	case "statements":
@@ -131,15 +134,118 @@ func requiredPermission(parts []string, method string) string {
 	case "reports":
 		return "report:read"
 	case "system":
+		if len(parts) > 1 && parts[1] == "org" {
+			if write {
+				return "org:write"
+			}
+			return "org:read"
+		}
+		if len(parts) > 1 && parts[1] == "workflows" {
+			if !write {
+				return "approval:read"
+			}
+			if len(parts) > 4 && parts[2] == "tasks" && parts[4] == "act" {
+				return "approval:write"
+			}
+			return "system:write"
+		}
 		if write {
 			return "system:write"
 		}
 		return "system:read"
-	case "simulate":
-		return "system:write"
 	default:
 		return ""
 	}
+}
+
+func menuPermissionMarks() map[string]string {
+	return map[string]string{
+		"overview":                 "dashboard:read",
+		"production":               "production:read",
+		"production-plans":         "production:read",
+		"production-tasks":         "production:read",
+		"production-batches":       "production:read",
+		"production-reports":       "production:read",
+		"master-products":          "master:read",
+		"master-materials":         "master:read",
+		"master-sites":             "master:read",
+		"master-plants":            "master:read",
+		"stock-yards":              "procurement:read",
+		"orders":                   "order:read",
+		"master-customers":         "master:read",
+		"customer-risk":            "master:read",
+		"master-projects":          "master:read",
+		"sales-pricing":            "master:read",
+		"portal-customer":          "customer:read",
+		"reports":                  "report:read",
+		"exceptions":               "quality:read",
+		"site-signing":             "delivery:read&dispatch:read",
+		"mix-designs":              "quality:read",
+		"plant-mix-designs":        "quality:read",
+		"trial-runs":               "quality:read",
+		"sample-tests":             "quality:read",
+		"equipment-calibration":    "quality:read",
+		"sample-ledger":            "quality:read",
+		"raw-material-receipts":    "procurement:read",
+		"inventory-transfers":      "procurement:read",
+		"inventory-stocktakes":     "procurement:read",
+		"raw-material-inspections": "quality:read",
+		"settlement":               "statement:read",
+		"contracts":                "contract:read",
+		"finance":                  "finance:read",
+		"finance-receivables":      "finance:read",
+		"finance-invoices":         "finance:read",
+		"finance-collections":      "finance:read",
+		"finance-suppliers":        "finance:read",
+		"finance-carriers":         "finance:read",
+		"master-drivers":           "master:read",
+		"master-vehicles":          "master:read",
+		"master-carriers":          "master:read",
+		"portal-driver":            "driver:read",
+		"dispatch":                 "dispatch:read",
+		"dispatch-schedules":       "dispatch:read",
+		"dispatch-queue":           "dispatch:read",
+		"delivery":                 "delivery:read",
+		"delivery-signs":           "delivery:read",
+		"map-center":               "vehicle:read",
+		"weighbridge":              "ticket:read",
+		"system-org":               "org:read",
+		"system-license":           "system:read",
+		"system-maintenance":       "system:read",
+		"system-gateway":           "system:read",
+		"system-security":          "system:read",
+		"system-identity":          "system:read",
+		"system-plugins":           "system:read",
+		"system-rules":             "rule:read",
+		"system-integrations":      "integration:read",
+		"system-menu":              "system:read",
+		"system-dictionaries":      "system:read",
+		"system-users":             "system:read",
+		"system-roles":             "system:read",
+		"system-workflows":         "system:read",
+		"system-audit":             "system:read",
+		"approval-center":          "approval:read",
+		"user-profile":             "bootstrap:read",
+		"account-security":         "bootstrap:read",
+	}
+}
+
+func editableMenuLabelKeys() map[string]struct{} {
+	keys := make(map[string]struct{}, len(menuPermissionMarks())+6)
+	for key := range menuPermissionMarks() {
+		keys[key] = struct{}{}
+	}
+	for _, key := range []string{
+		"group:production",
+		"group:sales",
+		"group:laboratory",
+		"group:finance",
+		"group:fleet",
+		"group:system-settings",
+	} {
+		keys[key] = struct{}{}
+	}
+	return keys
 }
 
 func canAccess(data AppData, user User, permission string) bool {
@@ -155,6 +261,9 @@ func canAccess(data AppData, user User, permission string) bool {
 func permissionGranted(grants []string, permission string) bool {
 	for _, granted := range grants {
 		if granted == "*" || granted == permission {
+			return true
+		}
+		if granted == "reports:read" && permission == "report:read" {
 			return true
 		}
 		if strings.HasSuffix(granted, ":*") && strings.HasPrefix(permission, strings.TrimSuffix(granted, "*")) {

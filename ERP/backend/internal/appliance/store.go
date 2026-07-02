@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,6 +39,26 @@ func NewStore(path string, passphrase string) *Store {
 	return &Store{path: path, key: sha256.Sum256([]byte(passphrase))}
 }
 
+func initialStoreData() AppData {
+	if demoSeedEnabled() {
+		return SeedData()
+	}
+	return InitialData()
+}
+
+func demoSeedEnabled() bool {
+	return envTruthy(os.Getenv("CBMP_SEED_DEMO")) || envTruthy(os.Getenv("CBMP_ERP_SEED_DEMO"))
+}
+
+func envTruthy(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -47,7 +68,7 @@ func (s *Store) Load() error {
 	}
 	raw, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		s.data = SeedData()
+		s.data = initialStoreData()
 		return s.saveLocked()
 	}
 	if err != nil {
@@ -65,6 +86,9 @@ func (s *Store) Load() error {
 	}
 	changed := ensureSeedCredentials(&s.data)
 	if ensureEnterpriseDefaults(&s.data) {
+		changed = true
+	}
+	if ensureWorkflowDefaults(&s.data) {
 		changed = true
 	}
 	if changed {
@@ -94,14 +118,26 @@ func cloneData(data AppData) (AppData, error) {
 func (s *Store) Mutate(fn func(*AppData) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := fn(&s.data); err != nil {
+	next, err := cloneData(s.data)
+	if err != nil {
 		return err
 	}
-	return s.saveLocked()
+	if err := fn(&next); err != nil {
+		return err
+	}
+	if err := s.saveDataLocked(next); err != nil {
+		return err
+	}
+	s.data = next
+	return nil
 }
 
 func (s *Store) saveLocked() error {
-	raw, err := json.MarshalIndent(s.data, "", "  ")
+	return s.saveDataLocked(s.data)
+}
+
+func (s *Store) saveDataLocked(data AppData) error {
+	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -206,26 +242,67 @@ func publicCompanies(items []Company) []Company {
 	return out
 }
 
-func ensureSeedCredentials(data *AppData) bool {
-	defaults := map[string]string{
-		"admin":      "admin123",
-		"dispatcher": "dispatch123",
-		"driver":     "driver123",
-		"customer":   "customer123",
-		"quality":    "quality123",
+var seedCredentialEnvVars = map[string]string{
+	"admin":        "CBMP_INITIAL_ADMIN_PASSWORD",
+	"dispatcher":   "CBMP_INITIAL_DISPATCHER_PASSWORD",
+	"driver":       "CBMP_INITIAL_DRIVER_PASSWORD",
+	"customer":     "CBMP_INITIAL_CUSTOMER_PASSWORD",
+	"quality":      "CBMP_INITIAL_QUALITY_PASSWORD",
+	"east_manager": "CBMP_INITIAL_EAST_MANAGER_PASSWORD",
+}
+
+const (
+	builtinSuperAdminUsername = "admin"
+	builtinSuperAdminPassword = "admin123"
+)
+
+func seedPasswordFor(username string) string {
+	envName, ok := seedCredentialEnvVars[username]
+	if !ok {
+		return ""
 	}
+	password := strings.TrimSpace(os.Getenv(envName))
+	if password != "" {
+		return password
+	}
+	if username == builtinSuperAdminUsername {
+		return builtinSuperAdminPassword
+	}
+	return ""
+}
+
+func seedUserCredential(username string) (salt string, hash string, status string) {
+	password := seedPasswordFor(username)
+	if password == "" {
+		return "", "", "pending"
+	}
+	salt, hash = makePassword(password)
+	return salt, hash, "active"
+}
+
+func ensureSeedCredentials(data *AppData) bool {
 	changed := false
 	for i := range data.Users {
 		if data.Users[i].PasswordHash != "" && data.Users[i].PasswordSalt != "" {
 			continue
 		}
-		password, ok := defaults[data.Users[i].Username]
-		if !ok {
+		if _, ok := seedCredentialEnvVars[data.Users[i].Username]; !ok {
+			continue
+		}
+		password := seedPasswordFor(data.Users[i].Username)
+		if password == "" {
+			if data.Users[i].Status != "pending" {
+				data.Users[i].Status = "pending"
+				changed = true
+			}
 			continue
 		}
 		salt, hash := makePassword(password)
 		data.Users[i].PasswordSalt = salt
 		data.Users[i].PasswordHash = hash
+		if data.Users[i].Status == "" || data.Users[i].Status == "pending" {
+			data.Users[i].Status = "active"
+		}
 		changed = true
 	}
 	return changed

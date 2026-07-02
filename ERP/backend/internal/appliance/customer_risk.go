@@ -14,12 +14,10 @@ func (a *App) createCustomerContact(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	err := a.store.Mutate(func(data *AppData) error {
-		if _, ok := findCustomer(*data, item.CustomerID); !ok {
-			return fmt.Errorf("客户不存在")
+		if err := normalizeCustomerContact(*data, &item, nil); err != nil {
+			return err
 		}
 		item.ID = nextID(data, "contact")
-		item.Role = fallback(item.Role, "业务联系人")
-		item.Status = fallback(item.Status, "active")
 		if item.IsDefault {
 			clearDefaultCustomerContact(data, item.CustomerID)
 			updateCustomerPrimaryContact(data, item.CustomerID, item.Name, item.Phone)
@@ -29,6 +27,38 @@ func (a *App) createCustomerContact(w http.ResponseWriter, r *http.Request, sess
 		return nil
 	})
 	a.respondMutation(w, err, item, "master.customer_contact.created")
+}
+
+func normalizeCustomerContact(data AppData, item *CustomerContact, current *CustomerContact) error {
+	if current != nil && item.CustomerID == 0 {
+		item.CustomerID = current.CustomerID
+	}
+	if _, ok := findCustomer(data, item.CustomerID); !ok {
+		return fmt.Errorf("客户不存在")
+	}
+	item.Name = strings.TrimSpace(item.Name)
+	item.Phone = strings.TrimSpace(item.Phone)
+	item.Role = strings.TrimSpace(item.Role)
+	item.Status = strings.TrimSpace(item.Status)
+	if current != nil {
+		item.Name = fallback(item.Name, current.Name)
+		item.Phone = fallback(item.Phone, current.Phone)
+		item.Role = fallback(item.Role, current.Role)
+		item.Status = fallback(item.Status, current.Status)
+		item.IsDefault = item.IsDefault || current.IsDefault
+	}
+	if item.Name == "" {
+		return fmt.Errorf("联系人姓名不能为空")
+	}
+	if item.Phone == "" {
+		return fmt.Errorf("联系人电话不能为空")
+	}
+	item.Role = fallback(item.Role, "业务联系人")
+	item.Status = fallback(item.Status, "active")
+	if item.IsDefault && item.Status != "active" {
+		return fmt.Errorf("非启用联系人不能设为默认")
+	}
+	return nil
 }
 
 func (a *App) setDefaultCustomerContact(w http.ResponseWriter, r *http.Request, session Session, id int64) {
@@ -58,12 +88,13 @@ func (a *App) createCustomerBlacklist(w http.ResponseWriter, r *http.Request, se
 		writeError(w, http.StatusBadRequest, "invalid customer blacklist")
 		return
 	}
+	topic := "master.customer_blacklist.created"
 	err := a.store.Mutate(func(data *AppData) error {
 		customer, ok := findCustomer(*data, item.CustomerID)
 		if !ok {
 			return fmt.Errorf("客户不存在")
 		}
-		if activeCustomerBlacklist(*data, item.CustomerID, true) {
+		if activeOrPendingCustomerBlacklist(*data, item.CustomerID, true) {
 			return fmt.Errorf("客户已有生效黑名单")
 		}
 		item.ID = nextID(data, "customerBlacklist")
@@ -74,34 +105,126 @@ func (a *App) createCustomerBlacklist(w http.ResponseWriter, r *http.Request, se
 		if !item.BlockOrders && !item.BlockDispatch {
 			item.BlockOrders = true
 		}
-		item.Status = "active"
+		item.Status = "pending_approval"
 		item.CreatedAt = nowString()
 		item.Actor = session.User.Username
 		data.CustomerBlacklists = append(data.CustomerBlacklists, item)
-		setCustomerStatus(data, item.CustomerID, "blocked")
+		_, instances, err := publishCustomerBlacklistWorkflow(data, item, session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			topic = "master.customer_blacklist.workflow_requested"
+			addAudit(data, session.User.Username, "request_create", "customer_blacklist", item.ID, item.CustomerName, clientIP(r))
+			return nil
+		}
+		activated, err := applyCustomerBlacklistActivationLocked(data, item.ID)
+		if err != nil {
+			return err
+		}
+		item = activated
 		addAudit(data, session.User.Username, "create", "customer_blacklist", item.ID, item.CustomerName, clientIP(r))
 		return nil
 	})
-	a.respondMutation(w, err, item, "master.customer_blacklist.created")
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishCustomerBlacklistWorkflow(data *AppData, item CustomerBlacklist, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "customer_blacklist.submitted",
+		Source:     "master",
+		Resource:   "customer_blacklist",
+		ResourceID: item.ID,
+		ResourceNo: item.CustomerName,
+		Title:      "客户黑名单审批",
+		Actor:      actor,
+		Reason:     fallback(item.Reason, "客户风险停供"),
+		Variables: map[string]string{
+			"customerId":    fmt.Sprintf("%d", item.CustomerID),
+			"customerName":  item.CustomerName,
+			"scope":         item.Scope,
+			"severity":      item.Severity,
+			"blockOrders":   fmt.Sprintf("%t", item.BlockOrders),
+			"blockDispatch": fmt.Sprintf("%t", item.BlockDispatch),
+			"reason":        item.Reason,
+		},
+	})
+}
+
+func applyCustomerBlacklistActivationLocked(data *AppData, id int64) (CustomerBlacklist, error) {
+	index := customerBlacklistIndex(*data, id)
+	if index < 0 {
+		return CustomerBlacklist{}, fmt.Errorf("客户黑名单不存在")
+	}
+	data.CustomerBlacklists[index].Status = "active"
+	setCustomerStatus(data, data.CustomerBlacklists[index].CustomerID, "blocked")
+	return data.CustomerBlacklists[index], nil
 }
 
 func (a *App) releaseCustomerBlacklist(w http.ResponseWriter, r *http.Request, session Session, id int64) {
-	var item CustomerBlacklist
+	var response interface{}
+	topic := "master.customer_blacklist.released"
 	err := a.store.Mutate(func(data *AppData) error {
 		index := customerBlacklistIndex(*data, id)
 		if index < 0 {
 			return fmt.Errorf("客户黑名单不存在")
 		}
-		data.CustomerBlacklists[index].Status = "released"
-		data.CustomerBlacklists[index].ReleasedAt = nowString()
-		item = data.CustomerBlacklists[index]
-		if !activeCustomerBlacklist(*data, item.CustomerID, true) {
-			setCustomerStatus(data, item.CustomerID, "active")
+		item := data.CustomerBlacklists[index]
+		_, instances, err := publishCustomerBlacklistReleaseWorkflow(data, item, session.User.Username)
+		if err != nil {
+			return err
 		}
-		addAudit(data, session.User.Username, "release", "customer_blacklist", item.ID, item.CustomerName, clientIP(r))
+		if len(instances) > 0 {
+			response = instances[0]
+			topic = "master.customer_blacklist.release.workflow_requested"
+			addAudit(data, session.User.Username, "request_release", "customer_blacklist", item.ID, item.CustomerName, clientIP(r))
+			return nil
+		}
+		released, err := applyCustomerBlacklistReleaseLocked(data, item.ID)
+		if err != nil {
+			return err
+		}
+		response = released
+		addAudit(data, session.User.Username, "release", "customer_blacklist", released.ID, released.CustomerName, clientIP(r))
 		return nil
 	})
-	a.respondMutation(w, err, item, "master.customer_blacklist.released")
+	a.respondMutation(w, err, response, topic)
+}
+
+func publishCustomerBlacklistReleaseWorkflow(data *AppData, item CustomerBlacklist, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "customer_blacklist_release.requested",
+		Source:     "master",
+		Resource:   "customer_blacklist_release",
+		ResourceID: item.ID,
+		ResourceNo: item.CustomerName,
+		Title:      "客户黑名单解除",
+		Actor:      actor,
+		Reason:     fallback(item.Reason, "客户风险解除"),
+		Variables: map[string]string{
+			"customerId":    fmt.Sprintf("%d", item.CustomerID),
+			"customerName":  item.CustomerName,
+			"scope":         item.Scope,
+			"severity":      item.Severity,
+			"blockOrders":   fmt.Sprintf("%t", item.BlockOrders),
+			"blockDispatch": fmt.Sprintf("%t", item.BlockDispatch),
+			"reason":        item.Reason,
+		},
+	})
+}
+
+func applyCustomerBlacklistReleaseLocked(data *AppData, id int64) (CustomerBlacklist, error) {
+	index := customerBlacklistIndex(*data, id)
+	if index < 0 {
+		return CustomerBlacklist{}, fmt.Errorf("客户黑名单不存在")
+	}
+	data.CustomerBlacklists[index].Status = "released"
+	data.CustomerBlacklists[index].ReleasedAt = nowString()
+	item := data.CustomerBlacklists[index]
+	if !activeCustomerBlacklist(*data, item.CustomerID, true) {
+		setCustomerStatus(data, item.CustomerID, "active")
+	}
+	return item, nil
 }
 
 func (a *App) createCustomerProfile(w http.ResponseWriter, r *http.Request, session Session) {
@@ -313,10 +436,13 @@ func (a *App) createContractAttachment(w http.ResponseWriter, r *http.Request, s
 		item.ID = nextID(data, "contractAttachment")
 		item.ContractID = contract.ID
 		item.CustomerID = contract.CustomerID
-		item.FileName = fallback(strings.TrimSpace(item.FileName), contract.ContractNo+".pdf")
-		item.FileType = fallback(item.FileType, "contract_pdf")
-		item.URL = fallback(item.URL, "vault://contracts/"+item.FileName)
-		item.Checksum = fallback(item.Checksum, "sha256:pending")
+		item.FileName = strings.TrimSpace(item.FileName)
+		item.URL = strings.TrimSpace(item.URL)
+		if item.FileName == "" || item.URL == "" {
+			return fmt.Errorf("合同附件名称和 URL 必填")
+		}
+		item.FileType = fallback(strings.TrimSpace(item.FileType), "contract_pdf")
+		item.Checksum = strings.TrimSpace(item.Checksum)
 		item.Status = fallback(item.Status, "active")
 		item.UploadedBy = fallback(session.User.DisplayName, session.User.Username)
 		item.UploadedAt = nowString()
@@ -416,6 +542,19 @@ func activeCustomerBlacklist(data AppData, customerID int64, ordersOnly bool) bo
 	return ok
 }
 
+func activeOrPendingCustomerBlacklist(data AppData, customerID int64, ordersOnly bool) bool {
+	for _, item := range data.CustomerBlacklists {
+		if item.CustomerID != customerID || (item.Status != "active" && item.Status != "pending_approval") {
+			continue
+		}
+		if ordersOnly && !item.BlockOrders {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func customerContactIndex(data AppData, id int64) int {
 	for i := range data.CustomerContacts {
 		if data.CustomerContacts[i].ID == id {
@@ -457,6 +596,42 @@ func clearDefaultCustomerContact(data *AppData, customerID int64) {
 		if data.CustomerContacts[i].CustomerID == customerID {
 			data.CustomerContacts[i].IsDefault = false
 		}
+	}
+}
+
+func syncCustomerPrimaryContact(data *AppData, customerID int64) {
+	selected := -1
+	for i := range data.CustomerContacts {
+		if data.CustomerContacts[i].CustomerID == customerID && data.CustomerContacts[i].Status == "active" && data.CustomerContacts[i].IsDefault {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 {
+		for i := range data.CustomerContacts {
+			if data.CustomerContacts[i].CustomerID == customerID && data.CustomerContacts[i].Status == "active" {
+				selected = i
+				break
+			}
+		}
+	}
+	for i := range data.CustomerContacts {
+		if data.CustomerContacts[i].CustomerID == customerID {
+			data.CustomerContacts[i].IsDefault = i == selected && data.CustomerContacts[i].Status == "active"
+		}
+	}
+	for i := range data.Customers {
+		if data.Customers[i].ID != customerID {
+			continue
+		}
+		if selected >= 0 {
+			data.Customers[i].Contact = data.CustomerContacts[selected].Name
+			data.Customers[i].Phone = data.CustomerContacts[selected].Phone
+			return
+		}
+		data.Customers[i].Contact = ""
+		data.Customers[i].Phone = ""
+		return
 	}
 }
 

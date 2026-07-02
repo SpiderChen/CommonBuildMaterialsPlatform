@@ -18,7 +18,7 @@ func (a *App) createTransferTicket(w http.ResponseWriter, r *http.Request, sessi
 			return fmt.Errorf("调拨单不存在")
 		}
 		if transfer.Status != "completed" {
-			return fmt.Errorf("调拨单未完成，不能生成调拨地磅票")
+			return fmt.Errorf("调拨单未完成，不能生成调拨过磅记录")
 		}
 		item = baseScaleTicket(data, "inventory_transfer", transfer.FromSiteID, req)
 		item.TransferID = transfer.ID
@@ -50,7 +50,7 @@ func (a *App) createReturnTicket(w http.ResponseWriter, r *http.Request, session
 			var ok bool
 			relatedTicket, ok = findScaleTicket(*data, req.RelatedTicketID)
 			if !ok {
-				return fmt.Errorf("原出厂票不存在")
+				return fmt.Errorf("原出厂过磅记录不存在")
 			}
 			req.DispatchID = nonZeroInt(req.DispatchID, relatedTicket.DispatchID)
 		}

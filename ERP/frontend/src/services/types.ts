@@ -145,6 +145,23 @@ export type User = {
   mfaEnabled: boolean;
 };
 
+export type Role = {
+  id: number;
+  code: string;
+  name: string;
+  permissions: string[];
+  dataScope: string;
+};
+
+export type GroupProfile = {
+  name: string;
+  code: string;
+  edition: string;
+  headquartersCompanyId: number;
+  operatingMode: string;
+  dataArchitecture: string;
+};
+
 export type LoginResult = {
   token?: string;
   user?: User;
@@ -223,6 +240,9 @@ export type Company = {
   id: number;
   name: string;
   code: string;
+  parentId: number;
+  level: string;
+  region: string;
   status: string;
 };
 
@@ -233,6 +253,36 @@ export type Department = {
   code: string;
   parentId: number;
   status: string;
+};
+
+export type OrganizationMetrics = {
+  companyCount: number;
+  activeCompanyCount: number;
+  siteCount: number;
+  runningSiteCount: number;
+  departmentCount: number;
+  userCount: number;
+};
+
+export type OrganizationNode = {
+  id: string;
+  parentId: string;
+  kind: string;
+  name: string;
+  code: string;
+  region: string;
+  status: string;
+  companyId: number;
+  siteId: number;
+};
+
+export type OrganizationOverview = {
+  group: GroupProfile;
+  metrics: OrganizationMetrics;
+  nodes: OrganizationNode[];
+  companies: Company[];
+  departments: Department[];
+  sites: Site[];
 };
 
 export type ModuleInfo = {
@@ -339,26 +389,7 @@ export type Site = {
   address: string;
   longitude: number;
   latitude: number;
-  status: string;
-};
-
-export type Warehouse = {
-  id: number;
-  siteId: number;
-  name: string;
-  code: string;
-  type: string;
-  status: string;
-};
-
-export type Silo = {
-  id: number;
-  warehouseId: number;
-  materialId: number;
-  name: string;
-  code: string;
-  capacity: number;
-  currentQty: number;
+  fenceRadius: number;
   status: string;
 };
 
@@ -597,6 +628,7 @@ export type Carrier = {
 
 export type Vehicle = {
   id: number;
+  internalNo: string;
   plateNo: string;
   vehicleType: string;
   capacity: string;
@@ -672,7 +704,11 @@ export type ProductionPlan = {
   planNo: string;
   orderId: number;
   siteId: number;
+  plantId: number;
+  plantCode: string;
   productId: number;
+  mixDesignId: number;
+  mixProfileId: number;
   planQuantity: number;
   producedQty: number;
   planDate: string;
@@ -681,12 +717,48 @@ export type ProductionPlan = {
   inventoryStatus: string;
   recipeStatus: string;
   status: string;
+  plannedTaskQty: number;
+  remainingQty: number;
+  progress: number;
+  riskReason: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProductionOverviewKPI = {
+  planCount: number;
+  activePlanCount: number;
+  taskCount: number;
+  runningTaskCount: number;
+  batchCount: number;
+  scheduledQty: number;
+  producedQty: number;
+  remainingQty: number;
+  todayPlannedQty: number;
+  todayProducedQty: number;
+  capacityWarnings: number;
+  inventoryWarnings: number;
+};
+
+export type ProductionPlanSummary = {
+  planDate: string;
+  siteId: number;
+  planCount: number;
+  taskCount: number;
+  batchCount: number;
+  plannedQty: number;
+  producedQty: number;
+  remainingQty: number;
+  status: string;
+  riskReason: string;
 };
 
 export type MixDesignMaterial = {
   materialId: number;
   dosage: number;
   unit: string;
+  bufferId?: number;
+  bufferCode?: string;
 };
 
 export type MixDesign = {
@@ -710,6 +782,40 @@ export type MixDesign = {
   createdAt: string;
   updatedAt: string;
   materials: MixDesignMaterial[];
+};
+
+export type MixDesignPlantProfileMaterial = {
+  materialId: number;
+  dosage: number;
+  adjustment: number;
+  unit: string;
+  bufferId: number;
+  bufferCode: string;
+  remark: string;
+};
+
+export type MixDesignPlantProfile = {
+  id: number;
+  mixDesignId: number;
+  productId: number;
+  siteId: number;
+  plantId: number;
+  plantCode: string;
+  code: string;
+  version: string;
+  scope: string;
+  status: string;
+  isCurrent: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
+  approvedBy: string;
+  approvedAt: string;
+  retiredAt: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  materials: MixDesignPlantProfileMaterial[];
+  remark: string;
 };
 
 export type MixDesignTrialRun = {
@@ -842,8 +948,11 @@ export type ProductionTask = {
   planId: number;
   orderId: number;
   siteId: number;
+  plantId: number;
+  plantCode: string;
   productId: number;
   mixDesignId: number;
+  mixProfileId: number;
   planQty: number;
   producedQty: number;
   status: string;
@@ -860,8 +969,10 @@ export type ProductionBatch = {
   planId: number;
   orderId: number;
   siteId: number;
+  plantId: number;
   productId: number;
   mixDesignId: number;
+  mixProfileId: number;
   quantity: number;
   plantCode: string;
   operator: string;
@@ -1205,6 +1316,8 @@ export type ApprovalTask = {
   createdAt: string;
   updatedAt: string;
   actions: ApprovalTaskAction[];
+  workflowInstanceId?: number;
+  workflowTaskId?: number;
 };
 
 export type ApprovalStep = {
@@ -1220,6 +1333,430 @@ export type ApprovalFlow = {
   resource: string;
   steps: ApprovalStep[];
   status: string;
+};
+
+export type WorkflowStep = {
+  seq: number;
+  code: string;
+  name: string;
+  type: string;
+  roleCode: string;
+  action: string;
+  slaHours?: number;
+};
+
+export type WorkflowCondition = {
+  field: string;
+  operator: string;
+  value: string;
+};
+
+export type WorkflowTrigger = {
+  eventType?: string;
+  resource?: string;
+  conditions?: WorkflowCondition[];
+};
+
+export type WorkflowDefinition = {
+  id: number;
+  code: string;
+  name: string;
+  category: string;
+  resource: string;
+  trigger?: WorkflowTrigger;
+  steps: WorkflowStep[];
+  status: string;
+  version: number;
+};
+
+export type WorkflowAction = {
+  seq: number;
+  taskId: number;
+  step: number;
+  stepCode: string;
+  roleCode: string;
+  action: string;
+  actor: string;
+  comment: string;
+  actedAt: string;
+  fromStatus: string;
+  toStatus: string;
+};
+
+export type WorkflowInstance = {
+  id: number;
+  instanceNo: string;
+  definitionId: number;
+  definitionCode: string;
+  definitionName: string;
+  category: string;
+  triggerEventId?: number;
+  resource: string;
+  resourceId: number;
+  resourceNo: string;
+  title: string;
+  applicant: string;
+  currentTaskId: number;
+  currentStep: number;
+  currentRole: string;
+  status: string;
+  reason: string;
+  variables?: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  actions: WorkflowAction[];
+};
+
+export type WorkflowInstanceQuery = {
+  status?: string;
+  category?: string;
+  resource?: string;
+  resourceId?: number;
+  resourceNo?: string;
+  definitionId?: number;
+  definitionCode?: string;
+  instanceNo?: string;
+  currentRole?: string;
+  triggerEventId?: number;
+};
+
+export type WorkflowTask = {
+  id: number;
+  taskNo: string;
+  instanceId: number;
+  definitionCode: string;
+  resource: string;
+  resourceId: number;
+  step: number;
+  stepCode: string;
+  stepName: string;
+  roleCode: string;
+  action: string;
+  status: string;
+  createdAt: string;
+  dueAt?: string;
+  completedAt?: string;
+  escalatedAt?: string;
+  escalatedBy?: string;
+  escalatedFromRole?: string;
+  escalationReason?: string;
+};
+
+export type WorkflowTaskQuery = {
+  status?: string;
+  resource?: string;
+  resourceId?: number;
+  definitionCode?: string;
+  instanceId?: number;
+  taskNo?: string;
+  roleCode?: string;
+  action?: string;
+  overdue?: boolean;
+};
+
+export type WorkflowInboxItem = {
+  task: WorkflowTask;
+  instance: WorkflowInstance;
+  canAct: boolean;
+  overdue: boolean;
+};
+
+export type WorkflowLog = {
+  id: number;
+  logNo: string;
+  instanceId?: number;
+  instanceNo?: string;
+  triggerEventId?: number;
+  taskId?: number;
+  taskNo?: string;
+  definitionCode?: string;
+  resource?: string;
+  resourceId?: number;
+  action: string;
+  status?: string;
+  actor?: string;
+  message?: string;
+  variables?: Record<string, string>;
+  createdAt: string;
+};
+
+export type WorkflowLogQuery = {
+  action?: string;
+  status?: string;
+  resource?: string;
+  resourceId?: number;
+  definitionCode?: string;
+  instanceId?: number;
+  instanceNo?: string;
+  triggerEventId?: number;
+  taskId?: number;
+  taskNo?: string;
+  actor?: string;
+};
+
+export type WorkflowOutbox = {
+  id: number;
+  outboxNo: string;
+  logId: number;
+  eventType: string;
+  instanceId?: number;
+  instanceNo?: string;
+  triggerEventId?: number;
+  taskId?: number;
+  taskNo?: string;
+  definitionCode?: string;
+  resource?: string;
+  resourceId?: number;
+  status: string;
+  attempts: number;
+  lastError?: string;
+  claimedBy?: string;
+  claimedAt?: string;
+  nextAttemptAt?: string;
+  acknowledgedBy?: string;
+  acknowledgedAt?: string;
+  payload?: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowOutboxQuery = {
+  status?: string;
+  eventType?: string;
+  resource?: string;
+  resourceId?: number;
+  definitionCode?: string;
+  outboxNo?: string;
+  triggerEventId?: number;
+  triggerEventKey?: string;
+};
+
+export type WorkflowSubscription = {
+  id: number;
+  code: string;
+  name: string;
+  eventType: string;
+  resource?: string;
+  definitionCode?: string;
+  targetType: string;
+  endpoint: string;
+  secret?: string;
+  retryLimit: number;
+  timeoutSeconds: number;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowDelivery = {
+  id: number;
+  deliveryNo: string;
+  outboxId: number;
+  outboxNo: string;
+  subscriptionId: number;
+  subscriptionCode: string;
+  subscriptionName: string;
+  eventType: string;
+  resource?: string;
+  resourceId?: number;
+  targetType: string;
+  endpoint: string;
+  status: string;
+  attempts: number;
+  retryLimit: number;
+  payload?: Record<string, string>;
+  requestPayload?: string;
+  responseStatus?: number;
+  responseBody?: string;
+  lastError?: string;
+  lastAttemptAt?: string;
+  nextAttemptAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowDeliveryQuery = {
+  status?: string;
+  eventType?: string;
+  resource?: string;
+  resourceId?: number;
+  definitionCode?: string;
+  subscriptionId?: number;
+  subscriptionCode?: string;
+  targetType?: string;
+  deliveryNo?: string;
+  outboxId?: number;
+  outboxNo?: string;
+  triggerEventId?: number;
+  triggerEventKey?: string;
+};
+
+export type WorkflowDeliveryDispatchResult = {
+  deliveryId: number;
+  deliveryNo?: string;
+  outboxNo?: string;
+  eventType?: string;
+  status: string;
+  responseStatus?: number;
+  error?: string;
+};
+
+export type WorkflowDeliveryDispatchBatch = {
+  total: number;
+  recovered: number;
+  dispatched: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  results: WorkflowDeliveryDispatchResult[];
+};
+
+export type WorkflowTaskEscalationResult = {
+  taskId: number;
+  taskNo?: string;
+  instanceId?: number;
+  instanceNo?: string;
+  fromRole?: string;
+  toRole?: string;
+  status: string;
+  error?: string;
+};
+
+export type WorkflowAutomationRun = {
+  deliveries: WorkflowDeliveryDispatchBatch;
+  escalated: number;
+  skipped: number;
+  escalations: WorkflowTaskEscalationResult[];
+};
+
+export type WorkflowEvent = {
+  id: number;
+  eventNo: string;
+  eventType: string;
+  source?: string;
+  eventKey?: string;
+  resource: string;
+  resourceId: number;
+  resourceNo: string;
+  title: string;
+  actor: string;
+  reason: string;
+  variables?: Record<string, string>;
+  status: string;
+  matchedDefinitions?: string[];
+  error?: string;
+  replayOfId?: number;
+  recoveredByEventId?: number;
+  resolution?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  createdAt: string;
+};
+
+export type WorkflowEventQuery = {
+  status?: string;
+  source?: string;
+  eventType?: string;
+  resource?: string;
+  resourceId?: number;
+  eventKey?: string;
+  replayOfId?: number;
+  recoveredByEventId?: number;
+  recovery?: boolean;
+};
+
+export type WorkflowEventPreviewMatch = {
+  definitionId: number;
+  definitionCode: string;
+  definitionName: string;
+  category: string;
+  resource: string;
+  stepCount: number;
+  firstRole?: string;
+  willStart: boolean;
+  pendingInstanceId?: number;
+  pendingInstanceNo?: string;
+  reason?: string;
+};
+
+export type WorkflowEventPreview = {
+  event: WorkflowEvent;
+  matchedDefinitions: string[];
+  matches: WorkflowEventPreviewMatch[];
+  willStart: number;
+  duplicate: boolean;
+  duplicateEventNo?: string;
+  warnings?: string[];
+};
+
+export type WorkflowCatalogField = {
+  key: string;
+  label: string;
+};
+
+export type WorkflowCatalogResource = {
+  value: string;
+  label: string;
+};
+
+export type WorkflowCatalogTrigger = {
+  module: string;
+  action: string;
+  method: string;
+  path: string;
+  handler: string;
+  description: string;
+};
+
+export type WorkflowCatalogIntegration = {
+  hasTrigger: boolean;
+  hasResultHandler: boolean;
+  resultPolicy: string;
+  status: string;
+};
+
+export type WorkflowCatalogOutboxEvent = {
+  eventType: string;
+  label: string;
+  description: string;
+  payloadFields: WorkflowCatalogField[];
+};
+
+export type WorkflowCatalogEvent = {
+  code: string;
+  label: string;
+  name: string;
+  resource: string;
+  eventType: string;
+  source: string;
+  description: string;
+  triggers: WorkflowCatalogTrigger[];
+  integration?: WorkflowCatalogIntegration;
+  conditions: Array<{ field: string; operator?: string; value?: string }>;
+  steps: Array<{ seq: number; code?: string; name?: string; type?: string; roleCode: string; action?: string; slaHours?: number }>;
+  variables: WorkflowCatalogField[];
+};
+
+export type WorkflowCatalog = {
+  events: WorkflowCatalogEvent[];
+  outboxEvents: WorkflowCatalogOutboxEvent[];
+  resources: WorkflowCatalogResource[];
+  conditionFields: WorkflowCatalogField[];
+};
+
+export type WorkflowOverview = {
+  definitions: WorkflowDefinition[];
+  instances: WorkflowInstance[];
+  tasks: WorkflowTask[];
+  inbox: WorkflowInboxItem[];
+  events: WorkflowEvent[];
+  logs: WorkflowLog[];
+  outbox: WorkflowOutbox[];
+  subscriptions: WorkflowSubscription[];
+  deliveries: WorkflowDelivery[];
+  catalog?: WorkflowCatalog;
 };
 
 export type DeliverySign = {
@@ -1243,7 +1780,21 @@ export type DeliverySign = {
   photo: string;
   signature: string;
   remark: string;
+  reviewStatus: string;
+  reviewedBy: string;
+  reviewedAt: string;
   signedAt: string;
+};
+
+export type DeliveryNote = {
+  id: number;
+  noteNo: string;
+  ticketId: number;
+  orderId: number;
+  dispatchId: number;
+  qrCode: string;
+  status: string;
+  createdAt: string;
 };
 
 export type DeliverySignLink = {
@@ -1631,6 +2182,16 @@ export type Payable = {
   status: string;
 };
 
+export type Payment = {
+  id: number;
+  paymentNo: string;
+  payableId: number;
+  supplierId: number;
+  amount: number;
+  method: string;
+  paidAt: string;
+};
+
 export type SupplierStatement = {
   id: number;
   statementNo: string;
@@ -1912,6 +2473,17 @@ export type SecurityReport = {
   recommendations: string[];
 };
 
+export type AuditLog = {
+  id: number;
+  user: string;
+  action: string;
+  resource: string;
+  resourceId: number;
+  detail: string;
+  ip: string;
+  createdAt: string;
+};
+
 export type FieldPolicy = {
   id: number;
   roleCode: string;
@@ -2077,19 +2649,147 @@ export type Plant = {
   name: string;
   code: string;
   capacity: string;
-  interface: string;
+  interface?: string;
   status: string;
+  gatewayStatus?: string;
+  gatewayDeviceNo?: string;
+  gatewayChannel?: string;
+  gatewayProtocol?: string;
+  lastFrameAt?: string;
+  lastFrameStatus?: string;
+  gatewayError?: string;
+};
+
+export type PlantBufferLocation = {
+  id: number;
+  siteId: number;
+  plantId: number;
+  plantCode: string;
+  code: string;
+  name: string;
+  type: string;
+  materialId: number;
+  allowedMaterialIds?: number[];
+  capacity: number;
+  unit: string;
+  currentQty: number;
+  warningQty: number;
+  moistureRate: number;
+  qualityStatus: string;
+  status: string;
+  gatewayDeviceNo?: string;
+  gatewayChannel?: string;
+  gatewayProtocol?: string;
+  lastReportedAt?: string;
+  lastFrameStatus?: string;
+  gatewayError?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlantBufferFlow = {
+  id: number;
+  flowNo: string;
+  siteId: number;
+  plantId: number;
+  bufferId: number;
+  bufferCode: string;
+  materialId: number;
+  sourceType: string;
+  sourceId: number;
+  direction: string;
+  quantity: number;
+  balanceQty: number;
+  unit: string;
+  moistureRate: number;
+  qualityStatus: string;
+  actor: string;
+  remark: string;
+  createdAt: string;
+};
+
+export type StockYard = {
+  id: number;
+  siteId: number;
+  code: string;
+  name: string;
+  type: string;
+  area: string;
+  capacity: number;
+  unit: string;
+  status: string;
+  gatewayDeviceNo?: string;
+  lastReportedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type StockYardPile = {
+  id: number;
+  siteId: number;
+  yardId: number;
+  yardCode: string;
+  code: string;
+  name: string;
+  materialId: number;
+  supplierId: number;
+  batchNo: string;
+  capacity: number;
+  unit: string;
+  currentQty: number;
+  warningQty: number;
+  moistureRate: number;
+  qualityStatus: string;
+  status: string;
+  gatewayDeviceNo?: string;
+  gatewayChannel?: string;
+  gatewayProtocol?: string;
+  lastReportedAt?: string;
+  lastFrameStatus?: string;
+  gatewayError?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type StockYardFlow = {
+  id: number;
+  flowNo: string;
+  siteId: number;
+  yardId: number;
+  pileId: number;
+  pileCode: string;
+  materialId: number;
+  sourceType: string;
+  sourceId: number;
+  direction: string;
+  quantity: number;
+  balanceQty: number;
+  unit: string;
+  moistureRate: number;
+  qualityStatus: string;
+  actor: string;
+  remark: string;
+  createdAt: string;
 };
 
 export type BootstrapData = {
   user: User;
   license: LicenseInfo;
+  groupProfile: GroupProfile;
   modules: ModuleInfo[];
-  roles: unknown[];
+  dictionaries: DataDictionary[];
+  menuPermissions: Record<string, string>;
+  menuLabels: Record<string, string>;
+  roles: Role[];
   companies: Company[];
   departments: Department[];
   sites: Site[];
   plants: Plant[];
+  plantBufferLocations: PlantBufferLocation[];
+  plantBufferFlows: PlantBufferFlow[];
+  stockYards: StockYard[];
+  stockYardPiles: StockYardPile[];
+  stockYardFlows: StockYardFlow[];
   customers: Customer[];
   customerContacts: CustomerContact[];
   customerBlacklists: CustomerBlacklist[];
@@ -2102,12 +2802,15 @@ export type BootstrapData = {
   materials: Material[];
   carriers: Carrier[];
   vehicles: Vehicle[];
+  vehicleDevices: VehicleDevice[];
   drivers: Driver[];
   contracts: Contract[];
   contractAttachments: ContractAttachment[];
   dispatchSchedules: DispatchSchedule[];
+  deliveryNotes: DeliveryNote[];
   productionPlans: ProductionPlan[];
   mixDesigns: MixDesign[];
+  mixDesignPlantProfiles: MixDesignPlantProfile[];
   mixDesignTrialRuns: MixDesignTrialRun[];
   productionTasks: ProductionTask[];
   productionBatches: ProductionBatch[];
@@ -2126,6 +2829,7 @@ export type DashboardData = {
   kpis: Record<string, number>;
   siteProduction: Record<string, number>;
   customerDebt: Record<string, number>;
+  organization: OrganizationMetrics;
   recentOrders: SalesOrder[];
   alarms: VehicleAlarm[];
   operating: OperatingAnalysisReport;
@@ -2207,12 +2911,13 @@ export type ProcurementOverview = {
   receipts: RawMaterialReceipt[];
   flows: InventoryFlow[];
   inventory: InventoryItem[];
+  stockYards: StockYard[];
+  stockYardPiles: StockYardPile[];
+  stockYardFlows: StockYardFlow[];
   transfers: InventoryTransfer[];
   stocktakes: InventoryStocktake[];
   traces: InventoryBatchTrace[];
   suppliers: unknown[];
-  warehouses: Warehouse[];
-  silos: Silo[];
 };
 
 export type ProductionOverview = {
@@ -2221,8 +2926,16 @@ export type ProductionOverview = {
   batches: ProductionBatch[];
   reports: ProductionDailyReport[];
   mixDesigns: MixDesign[];
+  mixDesignPlantProfiles: MixDesignPlantProfile[];
   plants: Plant[];
+  plantBufferLocations: PlantBufferLocation[];
+  plantBufferFlows: PlantBufferFlow[];
+  stockYards: StockYard[];
+  stockYardPiles: StockYardPile[];
+  stockYardFlows: StockYardFlow[];
   traces: InventoryBatchTrace[];
+  kpis: ProductionOverviewKPI;
+  planSummaries: ProductionPlanSummary[];
 };
 
 export type DataDictionary = {
@@ -2252,6 +2965,7 @@ export type QualityOverview = {
 export type LaboratoryOverview = {
   kpis: LaboratoryKPI;
   mixDesigns: MixDesign[];
+  mixDesignPlantProfiles: MixDesignPlantProfile[];
   trialRuns: MixDesignTrialRun[];
   qualityInspections: QualityInspection[];
   qualitySamples: QualitySample[];
@@ -2266,6 +2980,9 @@ export type LaboratoryOverview = {
   products: Product[];
   materials: Material[];
   sites: Site[];
+  plants: Plant[];
+  plantBufferLocations: PlantBufferLocation[];
+  dictionaries: DataDictionary[];
 };
 
 export type FinanceOverview = {
@@ -2283,7 +3000,7 @@ export type FinanceOverview = {
   agingBuckets: ReceivableAgingBucket[];
   supplierStatements: SupplierStatement[];
   payables: Payable[];
-  payments: unknown[];
+  payments: Payment[];
   transportSettlements: TransportSettlement[];
   transportSettlementItems: TransportSettlementItem[];
   costCalcs: unknown[];
@@ -2327,7 +3044,9 @@ export type SystemBundle = {
   runtime: RuntimeStatus;
   backups: BackupInfo[];
   backupDrills: BackupDrill[];
+  gateway: GatewayOverview;
   approvalFlows: ApprovalFlow[];
+  workflows: WorkflowOverview;
   dictionaries: DataDictionary[];
   licenseVerified: LicenseVerification;
 };

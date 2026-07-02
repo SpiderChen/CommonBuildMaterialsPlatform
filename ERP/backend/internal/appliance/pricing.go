@@ -74,62 +74,10 @@ func (a *App) createPricePolicy(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	err := a.store.Mutate(func(data *AppData) error {
-		if _, ok := findProduct(*data, item.ProductID); !ok {
-			return fmt.Errorf("产品不存在")
-		}
-		if item.CustomerID != 0 {
-			if _, ok := findCustomer(*data, item.CustomerID); !ok {
-				return fmt.Errorf("客户不存在")
-			}
-		}
-		if item.ProjectID != 0 {
-			if _, ok := findProject(*data, item.ProjectID); !ok {
-				return fmt.Errorf("项目不存在")
-			}
-		}
-		if item.TaxRateID != 0 {
-			if _, ok := findTaxRate(*data, item.TaxRateID); !ok {
-				return fmt.Errorf("税率不存在")
-			}
-		}
-		if item.SalePrice <= 0 {
-			return fmt.Errorf("销售价必须大于 0")
-		}
-		if item.FloorPrice < 0 {
-			return fmt.Errorf("底价不能小于 0")
-		}
-		if item.MinQuantity < 0 || item.MaxQuantity < 0 {
-			return fmt.Errorf("阶梯数量不能小于 0")
-		}
-		if item.MaxQuantity > 0 && item.MaxQuantity < item.MinQuantity {
-			return fmt.Errorf("阶梯最大量不能小于最小量")
-		}
 		item.ID = nextID(data, "pricePolicy")
-		item.CustomerGrade = strings.ToUpper(strings.TrimSpace(item.CustomerGrade))
-		item.Region = strings.TrimSpace(item.Region)
-		item.PromotionName = strings.TrimSpace(item.PromotionName)
-		item.PromotionType = strings.ToLower(strings.TrimSpace(item.PromotionType))
-		switch item.PromotionType {
-		case "", "none":
-			item.PromotionType = ""
-			item.PromotionValue = 0
-		case "fixed":
-			if item.PromotionValue <= 0 {
-				return fmt.Errorf("固定促销金额必须大于 0")
-			}
-			if item.PromotionValue >= item.SalePrice {
-				return fmt.Errorf("固定促销金额必须小于销售价")
-			}
-		case "percent":
-			if item.PromotionValue <= 0 || item.PromotionValue >= 1 {
-				return fmt.Errorf("百分比促销必须在 0 到 1 之间")
-			}
-		default:
-			return fmt.Errorf("促销类型仅支持 fixed 或 percent")
+		if err := normalizePricePolicy(*data, &item); err != nil {
+			return err
 		}
-		item.Status = fallback(item.Status, "active")
-		item.EffectiveFrom = fallback(item.EffectiveFrom, todayString())
-		item.EffectiveTo = fallback(item.EffectiveTo, "2099-12-31")
 		data.PricePolicies = append(data.PricePolicies, item)
 		addAudit(data, session.User.Username, "create", "price_policy", item.ID, fmt.Sprintf("product=%d price=%.2f", item.ProductID, item.SalePrice), clientIP(r))
 		return nil
@@ -144,17 +92,87 @@ func (a *App) createTaxRate(w http.ResponseWriter, r *http.Request, session Sess
 		return
 	}
 	err := a.store.Mutate(func(data *AppData) error {
-		if item.Rate < 0 || item.Rate > 1 {
-			return fmt.Errorf("税率必须在 0 到 1 之间")
-		}
 		item.ID = nextID(data, "taxRate")
-		item.Scope = fallback(item.Scope, "sales")
-		item.Status = fallback(item.Status, "active")
+		if err := normalizeTaxRate(&item); err != nil {
+			return err
+		}
 		data.TaxRates = append(data.TaxRates, item)
 		addAudit(data, session.User.Username, "create", "tax_rate", item.ID, item.Name, clientIP(r))
 		return nil
 	})
 	a.respondMutation(w, err, item, "master.tax_rate.created")
+}
+
+func normalizePricePolicy(data AppData, item *PricePolicy) error {
+	if _, ok := findProduct(data, item.ProductID); !ok {
+		return fmt.Errorf("产品不存在")
+	}
+	if item.CustomerID != 0 {
+		if _, ok := findCustomer(data, item.CustomerID); !ok {
+			return fmt.Errorf("客户不存在")
+		}
+	}
+	if item.ProjectID != 0 {
+		if _, ok := findProject(data, item.ProjectID); !ok {
+			return fmt.Errorf("项目不存在")
+		}
+	}
+	if item.TaxRateID != 0 {
+		if _, ok := findTaxRate(data, item.TaxRateID); !ok {
+			return fmt.Errorf("税率不存在")
+		}
+	}
+	if item.SalePrice <= 0 {
+		return fmt.Errorf("销售价必须大于 0")
+	}
+	if item.FloorPrice < 0 {
+		return fmt.Errorf("底价不能小于 0")
+	}
+	if item.MinQuantity < 0 || item.MaxQuantity < 0 {
+		return fmt.Errorf("阶梯数量不能小于 0")
+	}
+	if item.MaxQuantity > 0 && item.MaxQuantity < item.MinQuantity {
+		return fmt.Errorf("阶梯最大量不能小于最小量")
+	}
+	item.CustomerGrade = strings.ToUpper(strings.TrimSpace(item.CustomerGrade))
+	item.Region = strings.TrimSpace(item.Region)
+	item.PromotionName = strings.TrimSpace(item.PromotionName)
+	item.PromotionType = strings.ToLower(strings.TrimSpace(item.PromotionType))
+	switch item.PromotionType {
+	case "", "none":
+		item.PromotionType = ""
+		item.PromotionValue = 0
+	case "fixed":
+		if item.PromotionValue <= 0 {
+			return fmt.Errorf("固定促销金额必须大于 0")
+		}
+		if item.PromotionValue >= item.SalePrice {
+			return fmt.Errorf("固定促销金额必须小于销售价")
+		}
+	case "percent":
+		if item.PromotionValue <= 0 || item.PromotionValue >= 1 {
+			return fmt.Errorf("百分比促销必须在 0 到 1 之间")
+		}
+	default:
+		return fmt.Errorf("促销类型仅支持 fixed 或 percent")
+	}
+	item.Status = fallback(strings.TrimSpace(item.Status), "active")
+	item.EffectiveFrom = fallback(strings.TrimSpace(item.EffectiveFrom), todayString())
+	item.EffectiveTo = fallback(strings.TrimSpace(item.EffectiveTo), "2099-12-31")
+	return nil
+}
+
+func normalizeTaxRate(item *TaxRate) error {
+	item.Name = strings.TrimSpace(item.Name)
+	if item.Name == "" {
+		return fmt.Errorf("税率名称不能为空")
+	}
+	if item.Rate < 0 || item.Rate > 1 {
+		return fmt.Errorf("税率必须在 0 到 1 之间")
+	}
+	item.Scope = fallback(strings.TrimSpace(item.Scope), "sales")
+	item.Status = fallback(strings.TrimSpace(item.Status), "active")
+	return nil
 }
 
 func priceQuote(data AppData, order SalesOrder, customer Customer, project Project, product Product, contract Contract) PricingQuote {

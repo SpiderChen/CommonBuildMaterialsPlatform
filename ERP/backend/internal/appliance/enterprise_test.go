@@ -19,13 +19,87 @@ import (
 	"time"
 )
 
+var testSeedPasswords = map[string]string{
+	"admin":        "admin123",
+	"dispatcher":   "dispatch123",
+	"driver":       "driver123",
+	"customer":     "customer123",
+	"quality":      "quality123",
+	"east_manager": "company123",
+}
+
+func clearSeedPasswordEnv(t *testing.T) {
+	t.Helper()
+	for _, envName := range seedCredentialEnvVars {
+		t.Setenv(envName, "")
+	}
+}
+
+func enableTestSeedPasswords(t *testing.T) {
+	t.Helper()
+	clearSeedPasswordEnv(t)
+	for username, password := range testSeedPasswords {
+		t.Setenv(seedCredentialEnvVars[username], password)
+	}
+}
+
 func newTestHTTPApp(t *testing.T) *App {
 	t.Helper()
+	t.Setenv("CBMP_SEED_DEMO", "1")
+	enableTestSeedPasswords(t)
+	t.Setenv("CBMP_UPDATE_SIGNING_SECRET", "cbmp-test-update-signing-secret")
+	if strings.TrimSpace(os.Getenv("CBMP_TAX_GATEWAY_URL")) == "" {
+		installTestTaxGateway(t)
+	}
 	store := NewStore(filepath.Join(t.TempDir(), "app.vault"), "test-key")
 	if err := store.Load(); err != nil {
 		t.Fatalf("load store: %v", err)
 	}
-	return NewApp(store, "")
+	app := NewApp(store, "")
+	installTestDeviceCredentials(t, app)
+	return app
+}
+
+func installTestTaxGateway(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		requestID := stringFromMap(payload, "requestId")
+		invoiceNo := stringFromMap(payload, "invoiceNo")
+		if invoiceNo == "" {
+			invoiceNo = "INV-TEST"
+		}
+		writeJSON(w, http.StatusOK, map[string]string{
+			"requestId":    requestID,
+			"status":       "submitted",
+			"taxControlNo": "TAX-" + invoiceNo,
+			"fileUrl":      "https://tax.example.test/invoices/" + invoiceNo + ".pdf",
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CBMP_TAX_GATEWAY_URL", server.URL)
+	t.Setenv("CBMP_TAX_GATEWAY_PROVIDER", "test-tax")
+	t.Setenv("CBMP_TAX_GATEWAY_RETRIES", "0")
+}
+
+func installTestDeviceCredentials(t *testing.T, app *App) {
+	t.Helper()
+	credentials := []DeviceCredential{
+		{1, "GPS1000001", sha256Hex("device-demo-key-1"), []string{"location:report"}, "active", ""},
+		{2, "GPS1000002", sha256Hex("device-demo-key-2"), []string{"location:report"}, "active", ""},
+		{3, "GPS1000003", sha256Hex("device-demo-key-3"), []string{"location:report"}, "active", ""},
+		{4, "APP1000004", sha256Hex("driver-app-demo-key"), []string{"location:report"}, "active", ""},
+		{5, "NS-SCALE-01", sha256Hex("scale-demo-key-1"), []string{"scale:report"}, "active", ""},
+		{6, "PLANT-NS-AMP240", sha256Hex("plant-demo-key-1"), []string{"plant:report"}, "active", ""},
+		{7, "GPS-FORWARDER", sha256Hex("gps-forwarder-demo-key"), []string{"location:report"}, "active", ""},
+	}
+	if err := app.store.Mutate(func(data *AppData) error {
+		data.DeviceCredentials = credentials
+		return nil
+	}); err != nil {
+		t.Fatalf("install test device credentials: %v", err)
+	}
 }
 
 func TestAppFrontendStaticServingIsExplicit(t *testing.T) {
@@ -108,7 +182,64 @@ func TestERPRejectsProductOpsRoutes(t *testing.T) {
 	}
 }
 
-func TestStandaloneProductOpsIgnoresLegacyTenantBoundary(t *testing.T) {
+func TestERPRejectsSimulationRoutes(t *testing.T) {
+	app := newTestHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", "admin123")
+
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/simulate/tick", `{}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("ERP should not expose simulation route, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAccountProfileAndPasswordSelfService(t *testing.T) {
+	app := newTestHTTPApp(t)
+	token := testLogin(t, app, "admin", "admin123")
+
+	rec := testRequest(t, app, token, http.MethodPost, "/api/account/profile", `{"displayName":"平台管理员-自助"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("account profile status %d: %s", rec.Code, rec.Body.String())
+	}
+	var user User
+	if err := json.Unmarshal(rec.Body.Bytes(), &user); err != nil {
+		t.Fatalf("decode account profile: %v", err)
+	}
+	if user.DisplayName != "平台管理员-自助" || user.PasswordHash != "" || user.PasswordSalt != "" {
+		t.Fatalf("expected sanitized updated profile, got %+v", user)
+	}
+
+	rec = testRequest(t, app, token, http.MethodGet, "/api/bootstrap", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap after profile status %d: %s", rec.Code, rec.Body.String())
+	}
+	var bootstrap struct {
+		User User `json:"user"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("decode bootstrap after profile: %v", err)
+	}
+	if bootstrap.User.DisplayName != "平台管理员-自助" {
+		t.Fatalf("expected active session profile to sync, got %+v", bootstrap.User)
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/account/password", `{"currentPassword":"wrong","newPassword":"admin456"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "当前密码不正确") {
+		t.Fatalf("expected current password rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/account/password", `{"currentPassword":"admin123","newPassword":"admin456"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("change password status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/login", `{"username":"admin","password":"admin123"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("old password should not login, got %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = testLogin(t, app, "admin", "admin456")
+}
+
+func TestStandaloneERPIgnoresLegacyTenantBoundary(t *testing.T) {
 	app := newTestHTTPApp(t)
 	if err := app.store.Mutate(func(data *AppData) error {
 		if len(data.Tenants) != 0 || len(data.TenantPolicies) != 0 {
@@ -120,9 +251,9 @@ func TestStandaloneProductOpsIgnoresLegacyTenantBoundary(t *testing.T) {
 		data.Projects = append(data.Projects, Project{ID: 99, CustomerID: 99, Name: "华东项目", Address: "杭州项目", Contact: "赵总", Phone: "13899990000", Longitude: 120.1, Latitude: 30.2, Status: "active"})
 		data.Orders = append(data.Orders, SalesOrder{
 			ID: 99, OrderNo: "SO-LEGACY-ORG", CustomerID: 99, ProjectID: 99, ProductID: 1, SiteID: 99,
-			ProductLine: "concrete", PlanQuantity: 10, Unit: "m3", UnitPrice: 500,
+			ProductLine: "asphalt", PlanQuantity: 10, Unit: "t", UnitPrice: 500,
 			PlanTime: "2026-06-20 09:00:00", ReceiveAddress: "杭州项目", Contact: "赵总", Phone: "13899990000",
-			SettlementMode: "月结", TransportMode: "自有车队", StrengthGrade: "C30", Slump: "180mm", PouringPart: "基础",
+			SettlementMode: "月结", TransportMode: "自有车队", StrengthGrade: "AC-13", Slump: "油石比 5.1%", PouringPart: "主车道",
 			Status: "approved", CreatedAt: "2026-06-18 15:00:00",
 		})
 		data.Users = append(data.Users, User{ID: 99, TenantID: 2, CompanyID: 2, Username: "east-admin", DisplayName: "华东管理员", RoleCode: "boss", Status: "active"})
@@ -165,80 +296,108 @@ func TestStandaloneProductOpsIgnoresLegacyTenantBoundary(t *testing.T) {
 	}
 }
 
-func TestProductAlertEnterpriseChannelDeliveryUsesAuthSignatureAndPayload(t *testing.T) {
-	t.Skip("product operations moved to OperationsPlatform; ERP rejects /api/product-ops/*")
+func TestCompanyDataScopeShowsOnlyCompanyAndDescendants(t *testing.T) {
 	app := newTestHTTPApp(t)
-	adminToken := testLogin(t, app, "admin", "admin123")
+	if err := app.store.Mutate(func(data *AppData) error {
+		data.Customers = append(data.Customers, Customer{ID: 99, CompanyID: 2, Name: "华东重点客户", Contact: "赵总", Phone: "13899990000", CreditLimit: 100000, Status: "active"})
+		data.Projects = append(data.Projects, Project{ID: 99, CustomerID: 99, Name: "华东项目", Address: "杭州项目", Contact: "赵总", Phone: "13899990000", Longitude: 120.1, Latitude: 30.2, Status: "active"})
+		data.Orders = append(data.Orders, SalesOrder{
+			ID: 99, OrderNo: "SO-EAST-SCOPED", CustomerID: 99, ProjectID: 99, ProductID: 1, SiteID: 3,
+			ProductLine: "asphalt", PlanQuantity: 10, Unit: "t", UnitPrice: 500,
+			PlanTime: "2026-06-20 09:00:00", ReceiveAddress: "杭州项目", Contact: "赵总", Phone: "13899990000",
+			SettlementMode: "月结", TransportMode: "自有车队", StrengthGrade: "AC-13", Slump: "油石比 5.1%", PouringPart: "主车道",
+			Status: "approved", CreatedAt: "2026-06-18 15:00:00",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed company scoped data: %v", err)
+	}
 
-	var received struct {
-		authorization string
-		channelToken  string
-		timestamp     string
-		signature     string
-		payload       map[string]interface{}
-	}
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("unexpected method: %s", r.Method)
-		}
-		received.authorization = r.Header.Get("Authorization")
-		received.channelToken = r.Header.Get("X-CBMP-Channel-Token")
-		received.timestamp = r.Header.Get("X-CBMP-Timestamp")
-		received.signature = r.Header.Get("X-CBMP-Signature")
-		if err := json.NewDecoder(r.Body).Decode(&received.payload); err != nil {
-			t.Fatalf("decode notification payload: %v", err)
-		}
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer receiver.Close()
-
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/channels", `{"name":"企业微信值班群","code":"enterprise_wechat","type":"enterprise_wechat","endpoint":"`+receiver.URL+`","token":"wechat-token","secret":"notify-secret","status":"active","retryLimit":3,"timeoutSeconds":2,"remark":"真实企业微信机器人"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save enterprise wechat alert channel status %d: %s", rec.Code, rec.Body.String())
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/policies", `{"name":"服务端严重告警企业微信通知","source":"server","component":"server","metric":"all","severity":"critical","aggregateWindowMinutes":30,"suppressMinutes":0,"escalateAfterMinutes":0,"escalateTo":"on_call_manager","notifyChannels":["enterprise_wechat"],"status":"active"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save alert policy status %d: %s", rec.Code, rec.Body.String())
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts", `{"instanceId":1,"severity":"critical","source":"server","title":"服务端数据库连接池耗尽","message":"客户现场服务端数据库连接池耗尽"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create alert status %d: %s", rec.Code, rec.Body.String())
-	}
-	if received.authorization != "Bearer wechat-token" || received.channelToken != "wechat-token" {
-		t.Fatalf("expected notification auth headers, got Authorization=%q token=%q", received.authorization, received.channelToken)
-	}
-	if received.timestamp == "" || received.signature == "" {
-		t.Fatalf("expected signed notification headers, got timestamp=%q signature=%q", received.timestamp, received.signature)
-	}
-	raw, _ := json.Marshal(received.payload)
-	if expected := taxGatewaySignature("notify-secret", received.timestamp, raw); !hmac.Equal([]byte(expected), []byte(received.signature)) {
-		t.Fatalf("unexpected notification signature: got %s want %s", received.signature, expected)
-	}
-	if received.payload["msgtype"] != "markdown" {
-		t.Fatalf("expected enterprise wechat markdown payload: %+v", received.payload)
-	}
-	cbmp, _ := received.payload["cbmp"].(map[string]interface{})
-	if cbmp["schema"] != "cbmp.alert.v1" || cbmp["channel"] != "enterprise_wechat" || cbmp["channelCode"] != "enterprise_wechat" || cbmp["customerName"] != "湾区建材集团" {
-		t.Fatalf("expected cbmp alert payload metadata, got %+v", received.payload)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
+	token := testLogin(t, app, "east_manager", "company123")
+	rec := testRequest(t, app, token, http.MethodGet, "/api/bootstrap", "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview status %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("bootstrap status %d: %s", rec.Code, rec.Body.String())
 	}
-	var overview ProductOpsOverview
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode overview: %v", err)
+	var bootstrap struct {
+		GroupProfile GroupProfile `json:"groupProfile"`
+		Companies    []Company    `json:"companies"`
+		Sites        []Site       `json:"sites"`
+		Customers    []Customer   `json:"customers"`
 	}
-	foundDelivered := false
-	for _, item := range overview.AlertNotifications {
-		if item.Channel == "enterprise_wechat" && item.Status == "delivered" && item.ChannelNo != "" && item.Endpoint == receiver.URL {
-			foundDelivered = true
-			break
-		}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("decode bootstrap: %v", err)
 	}
-	if !foundDelivered {
-		t.Fatalf("expected delivered enterprise wechat notification in overview: %+v", overview.AlertNotifications)
+	if bootstrap.GroupProfile.DataArchitecture != "group-company-department" {
+		t.Fatalf("expected group architecture in bootstrap: %+v", bootstrap.GroupProfile)
+	}
+	if hasCompany(bootstrap.Companies, 1) || !hasCompany(bootstrap.Companies, 2) {
+		t.Fatalf("company manager should only see company 2 hierarchy: %+v", bootstrap.Companies)
+	}
+	if hasSite(bootstrap.Sites, 1) || !hasSite(bootstrap.Sites, 3) {
+		t.Fatalf("company manager should only see company sites: %+v", bootstrap.Sites)
+	}
+	if hasCustomer(bootstrap.Customers, 1) || !hasCustomer(bootstrap.Customers, 99) {
+		t.Fatalf("company manager should only see company customers: %+v", bootstrap.Customers)
+	}
+
+	rec = testRequest(t, app, token, http.MethodGet, "/api/orders", "")
+	if !strings.Contains(rec.Body.String(), "SO-EAST-SCOPED") || strings.Contains(rec.Body.String(), "SO202606180001") {
+		t.Fatalf("company manager should only see scoped orders: %s", rec.Body.String())
+	}
+	rec = testRequest(t, app, token, http.MethodGet, "/api/system/org", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("org status %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "南山沥青站") || !strings.Contains(rec.Body.String(), "杭州湾材料站") {
+		t.Fatalf("company manager should only see company organization nodes: %s", rec.Body.String())
+	}
+	var org OrganizationOverview
+	if err := json.Unmarshal(rec.Body.Bytes(), &org); err != nil {
+		t.Fatalf("decode org overview: %v", err)
+	}
+	if org.Metrics.UserCount != 1 {
+		t.Fatalf("company org metrics should count scoped users, got %+v", org.Metrics)
+	}
+	if hasOrgSiteNode(org.Nodes, 1) || !hasOrgSiteNode(org.Nodes, 3) {
+		t.Fatalf("company manager should only see company site nodes: %+v", org.Nodes)
+	}
+	if status := orgSiteNodeStatus(org.Nodes, 3); status != "active" {
+		t.Fatalf("organization site node should expose enable status, got %q", status)
+	}
+}
+
+func TestSiteScopedWritesAutoBindAndRejectOtherSites(t *testing.T) {
+	app := newTestHTTPApp(t)
+	salt, hash := makePassword("sitewriter123")
+	if err := app.store.Mutate(func(data *AppData) error {
+		data.Roles = append(data.Roles, Role{ID: 99, Code: "site-writer", Name: "站点录入员", Permissions: []string{"bootstrap:read", "master:*", "order:*", "procurement:*"}, DataScope: "site"})
+		data.Users = append(data.Users, User{ID: 99, CompanyID: 1, SiteID: 1, Username: "site_writer", DisplayName: "站点录入员", RoleCode: "site-writer", PasswordHash: hash, PasswordSalt: salt, Status: "active"})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed site writer: %v", err)
+	}
+	token := testLogin(t, app, "site_writer", "sitewriter123")
+
+	rec := testRequest(t, app, token, http.MethodPost, "/api/master/inventory", `{"materialId":1,"quantity":9,"warehouse":"站内仓"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("site scoped inventory create status %d: %s", rec.Code, rec.Body.String())
+	}
+	var inventory InventoryItem
+	if err := json.Unmarshal(rec.Body.Bytes(), &inventory); err != nil {
+		t.Fatalf("decode inventory: %v", err)
+	}
+	if inventory.SiteID != 1 {
+		t.Fatalf("expected auto-bound site 1, got %+v", inventory)
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/inventory", `{"siteId":3,"materialId":1,"quantity":9,"warehouse":"越权仓"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "无权操作该站点") {
+		t.Fatalf("expected cross-site inventory rejection, status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/orders", `{"customerId":1,"projectId":1,"productId":1,"siteId":3,"planQuantity":1,"unitPrice":500,"planTime":"2026-06-20 10:00:00","settlementMode":"月结","transportMode":"自有车队"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "无权操作该站点") {
+		t.Fatalf("expected cross-site order rejection, status %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -256,6 +415,14 @@ func TestCustomerContactsAndBlacklistBlockOrders(t *testing.T) {
 	}
 	if !contact.IsDefault || contact.ID == 0 {
 		t.Fatalf("expected default contact, got %+v", contact)
+	}
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/customer-contacts", `{"customerId":1,"name":"钱工","phone":"13800018888","role":"备用联系人","isDefault":false}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create backup customer contact status %d: %s", rec.Code, rec.Body.String())
+	}
+	var backupContact CustomerContact
+	if err := json.Unmarshal(rec.Body.Bytes(), &backupContact); err != nil {
+		t.Fatalf("decode backup customer contact: %v", err)
 	}
 
 	rec = testRequest(t, app, token, http.MethodGet, "/api/bootstrap", "")
@@ -277,6 +444,68 @@ func TestCustomerContactsAndBlacklistBlockOrders(t *testing.T) {
 	}
 	if updatedCustomer.Contact != "赵工" || updatedCustomer.Phone != "13800019999" {
 		t.Fatalf("expected customer primary contact updated, got %+v", updatedCustomer)
+	}
+
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/customer-contacts/"+strconv.FormatInt(contact.ID, 10), `{"customerId":1,"name":"赵经理","phone":"13800017777","role":"项目经理","isDefault":true,"status":"active"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update customer contact status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, token, http.MethodGet, "/api/bootstrap", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap after contact update status %d: %s", rec.Code, rec.Body.String())
+	}
+	bootstrap = struct {
+		Customers        []Customer        `json:"customers"`
+		CustomerContacts []CustomerContact `json:"customerContacts"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("decode bootstrap after contact update: %v", err)
+	}
+	updatedCustomer = Customer{}
+	for _, item := range bootstrap.Customers {
+		if item.ID == 1 {
+			updatedCustomer = item
+		}
+	}
+	if updatedCustomer.Contact != "赵经理" || updatedCustomer.Phone != "13800017777" {
+		t.Fatalf("expected edited default contact synced to customer, got %+v", updatedCustomer)
+	}
+
+	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/customer-contacts/"+strconv.FormatInt(contact.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete customer contact status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, token, http.MethodGet, "/api/bootstrap", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap after contact delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	bootstrap = struct {
+		Customers        []Customer        `json:"customers"`
+		CustomerContacts []CustomerContact `json:"customerContacts"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("decode bootstrap after contact delete: %v", err)
+	}
+	updatedCustomer = Customer{}
+	var promotedContact CustomerContact
+	for _, item := range bootstrap.Customers {
+		if item.ID == 1 {
+			updatedCustomer = item
+		}
+	}
+	for _, item := range bootstrap.CustomerContacts {
+		if item.CustomerID == 1 && item.IsDefault {
+			promotedContact = item
+		}
+		if item.ID == contact.ID {
+			t.Fatalf("deleted contact still returned in bootstrap: %+v", item)
+		}
+	}
+	if promotedContact.ID == 0 || !promotedContact.IsDefault || updatedCustomer.Contact != promotedContact.Name || updatedCustomer.Phone != promotedContact.Phone {
+		t.Fatalf("expected backup contact promoted after delete, got contact %+v customer %+v", promotedContact, updatedCustomer)
+	}
+	if backupContact.ID == 0 {
+		t.Fatalf("expected backup contact created")
 	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/master/customer-profiles/evaluate", `{}`)
@@ -355,7 +584,12 @@ func TestCustomerContactsAndBlacklistBlockOrders(t *testing.T) {
 		t.Fatalf("expected closed customer complaint, got %+v", complaint)
 	}
 
-	rec = testRequest(t, app, token, http.MethodPost, "/api/contracts/1/attachments", `{"fileName":"补充协议.pdf","fileType":"supplement","url":"vault://contracts/supplement.pdf","checksum":"sha256:supplement"}`)
+	rec = testRequest(t, app, token, http.MethodPost, "/api/contracts/1/attachments", `{"fileName":"补充协议.pdf","fileType":"supplement"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "合同附件名称和 URL 必填") {
+		t.Fatalf("expected contract attachment without URL to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/contracts/1/attachments", `{"fileName":"补充协议.pdf","fileType":"supplement","url":"data:application/pdf;base64,JVBERi0xLjQK","checksum":"sha256:supplement"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create contract attachment status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -363,7 +597,7 @@ func TestCustomerContactsAndBlacklistBlockOrders(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &attachment); err != nil {
 		t.Fatalf("decode contract attachment: %v", err)
 	}
-	if attachment.ContractID != 1 || attachment.CustomerID != 1 || attachment.FileName == "" {
+	if attachment.ContractID != 1 || attachment.CustomerID != 1 || attachment.FileName == "" || !strings.HasPrefix(attachment.URL, "data:application/pdf") {
 		t.Fatalf("expected contract attachment, got %+v", attachment)
 	}
 
@@ -537,7 +771,14 @@ func TestDeliverySignLinkPublicSignAndAttachments(t *testing.T) {
 		t.Fatalf("expected public detail for dispatch, got %+v", detail)
 	}
 
-	rec = testRequest(t, app, "", http.MethodPost, "/api/public/delivery-sign/"+link.Token, `{"signer":"赵工","phone":"13900001111","signedQty":16,"photo":"minio://delivery/site.jpg","signature":"赵工电子签名","remark":"现场验收","attachments":[{"fileName":"site.jpg","fileType":"photo","url":"minio://delivery/site.jpg","checksum":"sha256:site"}]}`)
+	rec = testRequest(t, app, "", http.MethodPost, "/api/public/delivery-sign/"+link.Token, `{"signer":"赵工","phone":"13900001111","signedQty":16,"attachments":[{"fileName":"site.jpg","fileType":"photo"}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "签收附件名称和 URL 必填") {
+		t.Fatalf("expected public sign attachment without URL to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	signPhotoURL := "data:image/jpeg;base64,c2l0ZS1waG90bw=="
+	signPhotoChecksum := "sha256:a7272c50c3073e10091c07605bd3d462da83e425dd5d50d92a052933d64d80c2"
+	rec = testRequest(t, app, "", http.MethodPost, "/api/public/delivery-sign/"+link.Token, `{"signer":"赵工","phone":"13900001111","signedQty":16,"photo":"`+signPhotoURL+`","signature":"赵工电子签名","remark":"现场验收","attachments":[{"fileName":"site.jpg","fileType":"photo","url":"`+signPhotoURL+`","checksum":"`+signPhotoChecksum+`"}]}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("public sign status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -577,7 +818,7 @@ func TestDeliverySignLinkPublicSignAndAttachments(t *testing.T) {
 	}
 	var foundAttachment bool
 	for _, item := range attachments {
-		if item.SignID == sign.ID && item.URL == "minio://delivery/site.jpg" {
+		if item.SignID == sign.ID && item.URL == signPhotoURL && item.Checksum == signPhotoChecksum {
 			foundAttachment = true
 		}
 	}
@@ -606,6 +847,16 @@ func TestPricingPolicyEvaluationAndBelowFloorApproval(t *testing.T) {
 	if tax.ID == 0 || tax.Rate != 0.06 {
 		t.Fatalf("expected tax rate, got %+v", tax)
 	}
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/tax-rates/"+strconv.FormatInt(tax.ID, 10), `{"name":"建材销售 7%","rate":0.07,"scope":"sales","status":"active"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update tax rate status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tax); err != nil {
+		t.Fatalf("decode updated tax rate: %v", err)
+	}
+	if tax.Name != "建材销售 7%" || tax.Rate != 0.07 {
+		t.Fatalf("expected updated tax rate, got %+v", tax)
+	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/master/price-policies", `{"customerId":1,"projectId":1,"productId":1,"customerGrade":"A","floorPrice":505,"salePrice":515,"taxRateId":`+strconv.FormatInt(tax.ID, 10)+`,"effectiveFrom":"2026-06-01","effectiveTo":"2027-05-31"}`)
 	if rec.Code != http.StatusCreated {
@@ -618,6 +869,16 @@ func TestPricingPolicyEvaluationAndBelowFloorApproval(t *testing.T) {
 	if policy.ID == 0 || policy.CustomerGrade != "A" || policy.SalePrice != 515 {
 		t.Fatalf("expected price policy, got %+v", policy)
 	}
+	rec = testRequest(t, app, token, http.MethodPut, "/api/master/price-policies/"+strconv.FormatInt(policy.ID, 10), `{"customerId":1,"projectId":1,"productId":1,"customerGrade":"A","floorPrice":510,"salePrice":520,"taxRateId":`+strconv.FormatInt(tax.ID, 10)+`,"effectiveFrom":"2026-06-01","effectiveTo":"2027-05-31","status":"active"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update price policy status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &policy); err != nil {
+		t.Fatalf("decode updated price policy: %v", err)
+	}
+	if policy.SalePrice != 520 || policy.FloorPrice != 510 {
+		t.Fatalf("expected updated price policy, got %+v", policy)
+	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/master/pricing/evaluate", `{"customerId":1,"projectId":1,"productId":1,"planTime":"2026-06-20 10:00:00"}`)
 	if rec.Code != http.StatusOK {
@@ -627,8 +888,24 @@ func TestPricingPolicyEvaluationAndBelowFloorApproval(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &quote); err != nil {
 		t.Fatalf("decode quote: %v", err)
 	}
-	if quote.PolicyID != policy.ID || quote.UnitPrice != 515 || quote.FloorPrice != 505 || quote.TaxRate != 0.06 {
+	if quote.PolicyID != policy.ID || quote.UnitPrice != 520 || quote.FloorPrice != 510 || quote.TaxRate != 0.07 {
 		t.Fatalf("expected policy quote, got %+v", quote)
+	}
+	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/tax-rates/"+strconv.FormatInt(tax.ID, 10), "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("referenced tax rate delete should be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/tax-rates", `{"name":"临时税率","rate":0.03,"scope":"sales"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create removable tax rate status %d: %s", rec.Code, rec.Body.String())
+	}
+	var removableTax TaxRate
+	if err := json.Unmarshal(rec.Body.Bytes(), &removableTax); err != nil {
+		t.Fatalf("decode removable tax rate: %v", err)
+	}
+	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/tax-rates/"+strconv.FormatInt(removableTax.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete removable tax rate status %d: %s", rec.Code, rec.Body.String())
 	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/orders", `{"customerId":1,"projectId":1,"productId":1,"siteId":1,"planQuantity":1,"unitPrice":500,"planTime":"2026-06-20 10:00:00","settlementMode":"月结","transportMode":"自有车队"}`)
@@ -651,6 +928,10 @@ func TestPricingPolicyEvaluationAndBelowFloorApproval(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected price below floor approval task, got %+v", tasks)
+	}
+	rec = testRequest(t, app, token, http.MethodDelete, "/api/master/price-policies/"+strconv.FormatInt(policy.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete price policy status %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -682,7 +963,7 @@ func TestMasterDataBulkImportExport(t *testing.T) {
 		t.Fatalf("expected partial material import, got %+v", result)
 	}
 
-	rec = testRequest(t, app, token, http.MethodPost, "/api/master/import", `{"resource":"products","mode":"upsert","rows":[{"id":1,"line":"concrete","name":"预拌混凝土","spec":"C30 P8 年度版","unit":"m3","basePrice":530,"costPrice":365,"requiresMix":true,"status":"active"}]}`)
+	rec = testRequest(t, app, token, http.MethodPost, "/api/master/import", `{"resource":"products","mode":"upsert","rows":[{"id":1,"line":"asphalt","name":"沥青混合料","spec":"AC-13 年度版","unit":"t","basePrice":530,"costPrice":365,"requiresMix":true,"status":"active"}]}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("upsert products status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -702,7 +983,7 @@ func TestMasterDataBulkImportExport(t *testing.T) {
 	}
 	var foundUpdated bool
 	for _, row := range exported.Rows {
-		if row["id"] == float64(1) && row["spec"] == "C30 P8 年度版" {
+		if row["id"] == float64(1) && row["spec"] == "AC-13 年度版" {
 			foundUpdated = true
 		}
 	}
@@ -716,7 +997,7 @@ func TestManagementReportsCoverOperatingAgingQualityAndEnergy(t *testing.T) {
 	token := testLogin(t, app, "admin", "admin123")
 	qualityToken := testLogin(t, app, "quality", "quality123")
 
-	rec := testRequest(t, app, qualityToken, http.MethodPost, "/api/quality/inspections", `{"batchId":1,"slump":"180mm","temperature":28.5,"remark":"报表质检样本"}`)
+	rec := testRequest(t, app, qualityToken, http.MethodPost, "/api/quality/inspections", `{"batchId":1,"slump":"油石比 5.1%","temperature":165,"remark":"报表质检样本"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create report quality inspection status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -942,7 +1223,7 @@ func TestAdvancedPricePolicyRegionTierPromotion(t *testing.T) {
 		"settlementMode":"月结",
 		"transportMode":"自有车队",
 		"lines":[
-			{"productId":1,"quantity":60,"strengthGrade":"C30","slump":"180mm","pouringPart":"底板"}
+			{"productId":1,"quantity":60,"strengthGrade":"AC-13","slump":"油石比 5.1%","pouringPart":"主车道下面层"}
 		]
 	}`)
 	if rec.Code != http.StatusCreated {
@@ -971,10 +1252,10 @@ func TestSalesOrderSupportsMultiplePricedLines(t *testing.T) {
 		"planTime":"2026-06-20 10:00:00",
 		"settlementMode":"月结",
 		"transportMode":"自有车队",
-		"pumpMode":"车载泵",
+		"pumpMode":"摊铺机",
 		"lines":[
-			{"productId":1,"quantity":10,"strengthGrade":"C30","slump":"180mm","pouringPart":"底板"},
-			{"productId":2,"quantity":5,"strengthGrade":"C40","slump":"160mm","pouringPart":"剪力墙"}
+			{"productId":1,"quantity":10,"strengthGrade":"AC-13","slump":"油石比 5.1%","pouringPart":"主车道下面层"},
+			{"productId":2,"quantity":5,"strengthGrade":"AC-20","slump":"油石比 4.8%","pouringPart":"匝道面层"}
 		]
 	}`
 	rec := testRequest(t, app, token, http.MethodPost, "/api/orders", payload)
@@ -1087,8 +1368,8 @@ func TestContractVersionApprovalFlow(t *testing.T) {
 		"changeReason":"年度价格条款调整",
 		"totalAmount":5600000,
 		"items":[
-			{"productId":1,"unit":"m3","quantity":11000,"unitPrice":530},
-			{"productId":2,"unit":"m3","quantity":3500,"unitPrice":620}
+			{"productId":1,"unit":"t","quantity":11000,"unitPrice":530},
+			{"productId":2,"unit":"t","quantity":3500,"unitPrice":620}
 		]
 	}`
 	rec := testRequest(t, app, token, http.MethodPost, "/api/contracts/1/revise", revisionPayload)
@@ -1167,6 +1448,33 @@ func hasSite(items []Site, id int64) bool {
 	return false
 }
 
+func hasOrgSiteNode(items []OrganizationNode, siteID int64) bool {
+	for _, item := range items {
+		if item.Kind == "site" && item.SiteID == siteID {
+			return true
+		}
+	}
+	return false
+}
+
+func orgSiteNodeStatus(items []OrganizationNode, siteID int64) string {
+	for _, item := range items {
+		if item.Kind == "site" && item.SiteID == siteID {
+			return item.Status
+		}
+	}
+	return ""
+}
+
+func hasCompany(items []Company, id int64) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func hasCustomer(items []Customer, id int64) bool {
 	for _, item := range items {
 		if item.ID == id {
@@ -1182,8 +1490,27 @@ func signLicenseForTest(item LicensePackage, privateKey ed25519.PrivateKey) (Lic
 		return item, err
 	}
 	item.Signature = "ed25519:" + base64.RawStdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
-	item.PublicKey = "ed25519:" + base64.RawStdEncoding.EncodeToString(privateKey.Public().(ed25519.PublicKey))
+	item.PublicKey = licensePublicKeyForTest(privateKey)
+	item.PublicKeyFingerprint = licensePublicKeyFingerprint(item.PublicKey)
 	return item, nil
+}
+
+func licensePublicKeyForTest(privateKey ed25519.PrivateKey) string {
+	return "ed25519:" + base64.RawStdEncoding.EncodeToString(privateKey.Public().(ed25519.PublicKey))
+}
+
+func clearTrustedLicenseIssuersForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("CBMP_LICENSE_TRUSTED_PUBLIC_KEYS", "")
+	t.Setenv("CBMP_LICENSE_ISSUER_PUBLIC_KEY", "")
+	t.Setenv("CBMP_LICENSE_ISSUER_PRIVATE_KEY", "")
+}
+
+func trustLicenseIssuerForTest(t *testing.T, privateKey ed25519.PrivateKey) {
+	t.Helper()
+	t.Setenv("CBMP_LICENSE_TRUSTED_PUBLIC_KEYS", licensePublicKeyForTest(privateKey))
+	t.Setenv("CBMP_LICENSE_ISSUER_PUBLIC_KEY", "")
+	t.Setenv("CBMP_LICENSE_ISSUER_PRIVATE_KEY", "")
 }
 
 func testLogin(t *testing.T, app *App, username, password string) string {
@@ -1231,8 +1558,8 @@ func TestEnterpriseAPIsCoverProcurementFinanceRulesAndUpdates(t *testing.T) {
 	}
 
 	rec = testRequest(t, app, token, http.MethodPost, "/api/finance/invoices", `{"statementId":1}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("invoice status %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate invoice rejection, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	rec = testRequest(t, app, token, http.MethodGet, "/api/finance/overview", "")
@@ -1520,6 +1847,7 @@ func TestUpdatePackageArtifactCanUseEd25519Signature(t *testing.T) {
 func TestOfflineLicensePackageImportAndVerify(t *testing.T) {
 	app := newTestHTTPApp(t)
 	token := testLogin(t, app, "admin", "admin123")
+	clearTrustedLicenseIssuersForTest(t)
 
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -1535,6 +1863,12 @@ func TestOfflineLicensePackageImportAndVerify(t *testing.T) {
 	}
 	payload, _ := json.Marshal(pkg)
 	rec := testRequest(t, app, token, http.MethodPost, "/api/system/license/import", string(payload))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "签发公钥未配置") {
+		t.Fatalf("expected untrusted license rejected before configuring issuer trust, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	trustLicenseIssuerForTest(t, privateKey)
+	rec = testRequest(t, app, token, http.MethodPost, "/api/system/license/import", string(payload))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("license import status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1586,6 +1920,7 @@ func TestLicenseIssueAndRevocationCenter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate license key: %v", err)
 	}
+	trustLicenseIssuerForTest(t, privateKey)
 	issuePayload, _ := json.Marshal(map[string]interface{}{
 		"customerName": "华南授权客户", "watermark": "CBMP-HN", "expiresAt": "2028-12-31",
 		"edition": "Enterprise", "modules": []string{"core", "dispatch", "finance", "license"},
@@ -1847,6 +2182,56 @@ func TestGatewayRouteCanaryDrainAndNginxRender(t *testing.T) {
 	if !strings.Contains(rendered.NginxConfig, "25% cbmp_api_canary") || !strings.Contains(rendered.NginxConfig, "X-CBMP-Drain true") {
 		t.Fatalf("rendered nginx missing canary/drain: %s", rendered.NginxConfig)
 	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/system/gateway", `{"name":"待删除网关","pathPrefix":"/delete-gateway/","stableUpstream":"delete-upstream:8088","readTimeoutSec":90,"status":"active"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create deletable gateway route status %d: %s", rec.Code, rec.Body.String())
+	}
+	var deleteRoute GatewayRoute
+	if err := json.Unmarshal(rec.Body.Bytes(), &deleteRoute); err != nil {
+		t.Fatalf("decode deletable gateway route: %v", err)
+	}
+
+	deleteURL := "/api/system/gateway/routes/" + strconv.FormatInt(deleteRoute.ID, 10)
+	rec = testRequest(t, app, token, http.MethodDelete, deleteURL, "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "启用中的网关路由不能删除") {
+		t.Fatalf("expected active gateway route delete to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, deleteURL+"/status", `{"status":"disabled"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("disable deletable gateway route status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &deleteRoute); err != nil {
+		t.Fatalf("decode disabled gateway route: %v", err)
+	}
+	if deleteRoute.Status != "disabled" {
+		t.Fatalf("expected gateway route disabled before delete, got %+v", deleteRoute)
+	}
+
+	rec = testRequest(t, app, token, http.MethodDelete, deleteURL, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("delete gateway route status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &deleteRoute); err != nil {
+		t.Fatalf("decode deleted gateway route: %v", err)
+	}
+
+	rec = testRequest(t, app, token, http.MethodGet, "/api/system/gateway", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gateway overview after delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("decode gateway overview after delete: %v", err)
+	}
+	for _, item := range overview.Routes {
+		if item.ID == deleteRoute.ID {
+			t.Fatalf("deleted gateway route still present: %+v", item)
+		}
+	}
+	if strings.Contains(overview.NginxConfig, "/delete-gateway/") {
+		t.Fatalf("deleted gateway route still rendered in nginx config: %s", overview.NginxConfig)
+	}
 }
 
 func TestOIDCSSOStartCallbackAndProvision(t *testing.T) {
@@ -1860,11 +2245,29 @@ func TestOIDCSSOStartCallbackAndProvision(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &providers); err != nil {
 		t.Fatalf("decode providers: %v", err)
 	}
-	if len(providers) == 0 || providers[0].ClientSecret != "" {
-		t.Fatalf("expected public active provider without secret: %+v", providers)
+	if len(providers) != 0 {
+		t.Fatalf("expected no default SSO providers, got %+v", providers)
 	}
 
-	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/enterprise-demo/start", `{}`)
+	adminToken := testLogin(t, app, "admin", "admin123")
+	providerPayload := `{"name":"测试 OIDC","code":"test-oidc","issuer":"https://idp.example.com/cbmp","clientId":"cbmp-desktop","clientSecret":"test-oidc-secret","authUrl":"https://idp.example.com/oauth2/v1/authorize","tokenUrl":"https://idp.example.com/oauth2/v1/token","redirectUri":"http://127.0.0.1:8088/api/auth/sso/test-oidc/callback","scopes":["openid","profile","email"],"usernameClaim":"preferred_username","displayNameClaim":"name","roleCode":"boss","companyId":1,"autoProvision":true,"status":"enabled"}`
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/sso/providers", providerPayload)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create sso provider status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, "", http.MethodGet, "/api/auth/sso/providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sso providers after create status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &providers); err != nil {
+		t.Fatalf("decode created providers: %v", err)
+	}
+	if len(providers) != 1 || providers[0].Code != "test-oidc" || providers[0].ClientSecret != "" {
+		t.Fatalf("expected public active test provider without secret: %+v", providers)
+	}
+
+	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/test-oidc/start", `{}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sso start status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1876,13 +2279,13 @@ func TestOIDCSSOStartCallbackAndProvision(t *testing.T) {
 		t.Fatalf("unexpected sso start response: %+v", start)
 	}
 
-	idToken := signOIDCTestToken(t, "cbmp-oidc-demo-secret", map[string]interface{}{
+	idToken := signOIDCTestToken(t, "test-oidc-secret", map[string]interface{}{
 		"iss": "https://idp.example.com/cbmp", "aud": "cbmp-desktop",
 		"exp": time.Now().Add(5 * time.Minute).Unix(), "nonce": start.Nonce,
 		"preferred_username": "sso.manager", "name": "SSO 经理",
 	})
 	body, _ := json.Marshal(map[string]string{"state": start.State, "idToken": idToken})
-	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/enterprise-demo/callback", string(body))
+	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/test-oidc/callback", string(body))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sso callback status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1915,7 +2318,7 @@ func TestOIDCSSOStartCallbackAndProvision(t *testing.T) {
 		t.Fatalf("expected provisioned user and public provider state: %+v", security)
 	}
 
-	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/enterprise-demo/start", `{}`)
+	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/test-oidc/start", `{}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second sso start status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1927,9 +2330,94 @@ func TestOIDCSSOStartCallbackAndProvision(t *testing.T) {
 		"preferred_username": "sso.manager",
 	})
 	body, _ = json.Marshal(map[string]string{"state": deniedStart.State, "idToken": tampered})
-	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/enterprise-demo/callback", string(body))
+	rec = testRequest(t, app, "", http.MethodPost, "/api/auth/sso/test-oidc/callback", string(body))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected tampered id_token rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIdentityProviderDeleteConfigurationAPIs(t *testing.T) {
+	app := newTestHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", "admin123")
+
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/system/sso/providers", `{"name":"待删除 OIDC","code":"delete-oidc","issuer":"https://idp.example.com/delete","clientId":"cbmp-delete","clientSecret":"delete-secret","authUrl":"https://idp.example.com/oauth2/v1/authorize","tokenUrl":"https://idp.example.com/oauth2/v1/token","redirectUri":"http://127.0.0.1:8088/api/auth/sso/delete-oidc/callback","scopes":["openid","profile"],"usernameClaim":"preferred_username","displayNameClaim":"name","roleCode":"boss","companyId":1,"autoProvision":false,"status":"enabled"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create deletable sso provider status %d: %s", rec.Code, rec.Body.String())
+	}
+	var oidc OIDCProvider
+	if err := json.Unmarshal(rec.Body.Bytes(), &oidc); err != nil {
+		t.Fatalf("decode deletable sso provider: %v", err)
+	}
+	if oidc.ID == 0 || oidc.ClientSecret != "" {
+		t.Fatalf("expected public sso provider without secret, got %+v", oidc)
+	}
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/sso/providers/"+strconv.FormatInt(oidc.ID, 10), "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "启用中的 SSO 提供商不能删除") {
+		t.Fatalf("enabled sso provider delete should be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/sso/providers/"+strconv.FormatInt(oidc.ID, 10)+"/status", `{"status":"disabled"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("disable sso provider status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/sso/providers/"+strconv.FormatInt(oidc.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete sso provider status %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "delete-secret") || strings.Contains(rec.Body.String(), `"clientSecret"`) {
+		t.Fatalf("delete sso provider response must not expose secret: %s", rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/sso/providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sso providers after delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	var oidcProviders []OIDCProvider
+	if err := json.Unmarshal(rec.Body.Bytes(), &oidcProviders); err != nil {
+		t.Fatalf("decode sso providers after delete: %v", err)
+	}
+	for _, item := range oidcProviders {
+		if item.ID == oidc.ID {
+			t.Fatalf("deleted sso provider still listed: %+v", item)
+		}
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/scim/providers", `{"name":"待删除 SCIM","code":"delete-scim","bearerToken":"delete-scim-token","companyId":1,"siteId":0,"defaultRoleCode":"dispatcher","status":"enabled"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create deletable scim provider status %d: %s", rec.Code, rec.Body.String())
+	}
+	var scim SCIMProvider
+	if err := json.Unmarshal(rec.Body.Bytes(), &scim); err != nil {
+		t.Fatalf("decode deletable scim provider: %v", err)
+	}
+	if scim.ID == 0 || scim.BearerToken != "" {
+		t.Fatalf("expected public scim provider without token, got %+v", scim)
+	}
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/scim/providers/"+strconv.FormatInt(scim.ID, 10), "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "启用中的 SCIM 提供商不能删除") {
+		t.Fatalf("enabled scim provider delete should be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/scim/providers/"+strconv.FormatInt(scim.ID, 10)+"/status", `{"status":"disabled"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("disable scim provider status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/scim/providers/"+strconv.FormatInt(scim.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete scim provider status %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "delete-scim-token") || strings.Contains(rec.Body.String(), `"bearerToken"`) {
+		t.Fatalf("delete scim provider response must not expose token: %s", rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/scim/providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scim providers after delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	var scimProviders []SCIMProvider
+	if err := json.Unmarshal(rec.Body.Bytes(), &scimProviders); err != nil {
+		t.Fatalf("decode scim providers after delete: %v", err)
+	}
+	for _, item := range scimProviders {
+		if item.ID == scim.ID {
+			t.Fatalf("deleted scim provider still listed: %+v", item)
+		}
 	}
 }
 
@@ -2033,748 +2521,6 @@ func TestSCIMProviderProvisioningAndSecurityReport(t *testing.T) {
 	}
 	if !foundUser || len(security.SCIMEvents) < 2 || security.Report.SCIMProviders == 0 || security.Report.SCIMEventsLast24h == 0 {
 		t.Fatalf("expected scim user, events and report counters: %+v", security)
-	}
-}
-
-func TestProductOpsOverviewInstancesAlertsAndUpdates(t *testing.T) {
-	t.Skip("product operations moved to OperationsPlatform; ERP rejects /api/product-ops/*")
-	app := newTestHTTPApp(t)
-	adminToken := testLogin(t, app, "admin", "admin123")
-
-	rec := testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview status %d: %s", rec.Code, rec.Body.String())
-	}
-	var overview ProductOpsOverview
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode product ops overview: %v", err)
-	}
-	if overview.KPIs.Customers == 0 || len(overview.Instances) == 0 || len(overview.Alerts) == 0 || len(overview.RenewalTasks) == 0 {
-		t.Fatalf("expected seeded product ops instances and alerts: %+v", overview.KPIs)
-	}
-	if overview.KPIs.OpenRenewals == 0 {
-		t.Fatalf("expected seeded renewal tasks: %+v", overview.KPIs)
-	}
-	if overview.KPIs.ClientUpdatePackages == 0 || overview.KPIs.ServerUpdatePackages == 0 {
-		t.Fatalf("expected client/server update packages: %+v", overview.KPIs)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/updates", `{"version":"1.0.2","component":"client","channel":"stable","status":"available","checksum":"sha256:client-102","signature":"sig:client-102","rollbackVersion":"1.0.1","fileName":"cbmp-client-1.0.2.json","sizeBytes":2048,"remark":"客户端运营台修复包"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("publish client update status %d: %s", rec.Code, rec.Body.String())
-	}
-	var clientUpdate UpdatePackage
-	if err := json.Unmarshal(rec.Body.Bytes(), &clientUpdate); err != nil {
-		t.Fatalf("decode published client update: %v", err)
-	}
-	if clientUpdate.ID == 0 || clientUpdate.Component != "client" || clientUpdate.PublishedBy == "" || clientUpdate.PublishedAt == "" {
-		t.Fatalf("unexpected published client update: %+v", clientUpdate)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/updates/"+strconv.FormatInt(clientUpdate.ID, 10)+"/download", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("download published client update status %d: %s", rec.Code, rec.Body.String())
-	}
-	var clientDownload UpdatePackageDownload
-	if err := json.Unmarshal(rec.Body.Bytes(), &clientDownload); err != nil {
-		t.Fatalf("decode published client update download: %v", err)
-	}
-	if !clientDownload.Verified || clientDownload.Package.Component != "client" || clientDownload.Package.DownloadCount == 0 || clientDownload.Package.LastDownloadedAt == "" {
-		t.Fatalf("unexpected client update download: %+v", clientDownload)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/updates/"+strconv.FormatInt(clientUpdate.ID, 10)+"/apply", `{}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("apply published client update status %d: %s", rec.Code, rec.Body.String())
-	}
-	var appliedClient UpdatePackage
-	if err := json.Unmarshal(rec.Body.Bytes(), &appliedClient); err != nil {
-		t.Fatalf("decode applied client update: %v", err)
-	}
-	if appliedClient.Status != "installed" || appliedClient.AppliedBy == "" || appliedClient.AppliedAt == "" {
-		t.Fatalf("expected applied client update metadata: %+v", appliedClient)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/instances", `{"customerName":"西南建材客户","licenseId":"LIC-SW-2026","watermark":"CBMP-SW","edition":"Enterprise","deploymentMode":"private","clientVersion":"1.0.1","serverVersion":"1.0.1","endpoint":"https://cbmp.sw.example","status":"online","licenseExpiresAt":"2026-09-30","renewalOwner":"客户成功-周舟","renewalStage":"新签","alertLevel":"normal"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create product instance status %d: %s", rec.Code, rec.Body.String())
-	}
-	var instance ProductInstance
-	if err := json.Unmarshal(rec.Body.Bytes(), &instance); err != nil {
-		t.Fatalf("decode product instance: %v", err)
-	}
-	if instance.ID == 0 || instance.CustomerName != "西南建材客户" {
-		t.Fatalf("unexpected product instance: %+v", instance)
-	}
-	if instance.ProbeToken == "" || !instance.ProbeEnabled {
-		t.Fatalf("expected product instance probe token: %+v", instance)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/rollouts", `{"updateId":`+strconv.FormatInt(clientUpdate.ID, 10)+`,"strategy":"gray","targetInstanceIds":[`+strconv.FormatInt(instance.ID, 10)+`],"remark":"西南客户客户端灰度批次"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create update rollout status %d: %s", rec.Code, rec.Body.String())
-	}
-	var rollout ProductUpdateRollout
-	if err := json.Unmarshal(rec.Body.Bytes(), &rollout); err != nil {
-		t.Fatalf("decode update rollout: %v", err)
-	}
-	if rollout.ID == 0 || rollout.UpdateID != clientUpdate.ID || rollout.TotalTargets != 1 || len(rollout.Items) != 1 || rollout.Status != "pending" {
-		t.Fatalf("unexpected update rollout: %+v", rollout)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/rollouts/"+strconv.FormatInt(rollout.ID, 10)+"/execute", `{"action":"apply","instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"dryRun":true,"remark":"预检灰度执行"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("dry-run update rollout execution status %d: %s", rec.Code, rec.Body.String())
-	}
-	var dryRunExecution ProductUpdateExecution
-	if err := json.Unmarshal(rec.Body.Bytes(), &dryRunExecution); err != nil {
-		t.Fatalf("decode dry-run update execution: %v", err)
-	}
-	if dryRunExecution.Status != "dry_run_passed" || !dryRunExecution.DryRun || len(dryRunExecution.Steps) == 0 || !dryRunExecution.ChecksumVerified {
-		t.Fatalf("expected successful dry-run execution: %+v", dryRunExecution)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/rollouts/"+strconv.FormatInt(rollout.ID, 10)+"/execute", `{"action":"apply","instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"remark":"灰度执行成功"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("execute update rollout status %d: %s", rec.Code, rec.Body.String())
-	}
-	var execution ProductUpdateExecution
-	if err := json.Unmarshal(rec.Body.Bytes(), &execution); err != nil {
-		t.Fatalf("decode update execution: %v", err)
-	}
-	if execution.Status != "succeeded" || execution.Action != "apply" || execution.InstanceID != instance.ID || len(execution.Steps) < 5 || execution.Result == "" {
-		t.Fatalf("expected completed update execution: %+v", execution)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview after rollout status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode product ops overview after rollout: %v", err)
-	}
-	foundRolledInstance := false
-	for _, item := range overview.Instances {
-		if item.ID == instance.ID {
-			foundRolledInstance = item.ClientVersion == clientUpdate.Version
-			break
-		}
-	}
-	if !foundRolledInstance || len(overview.UpdateRollouts) == 0 {
-		t.Fatalf("expected rollout overview and instance version update: %+v", overview)
-	}
-	if len(overview.UpdateExecutions) < 2 || overview.KPIs.UpdateExecutions < 2 {
-		t.Fatalf("expected update execution overview and KPI: %+v", overview.KPIs)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/updates", `{"version":"1.0.3","component":"client","channel":"stable","status":"available","checksum":"sha256:client-103","signature":"sig:client-103","rollbackVersion":"1.0.2","fileName":"cbmp-client-1.0.3.json","sizeBytes":3072,"remark":"客户端端内更新器更新包"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("publish updater client update status %d: %s", rec.Code, rec.Body.String())
-	}
-	var updaterUpdate UpdatePackage
-	if err := json.Unmarshal(rec.Body.Bytes(), &updaterUpdate); err != nil {
-		t.Fatalf("decode updater client update: %v", err)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/rollouts", `{"updateId":`+strconv.FormatInt(updaterUpdate.ID, 10)+`,"strategy":"gray","targetInstanceIds":[`+strconv.FormatInt(instance.ID, 10)+`],"remark":"西南端内更新器更新批次"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create updater rollout status %d: %s", rec.Code, rec.Body.String())
-	}
-	var updaterRollout ProductUpdateRollout
-	if err := json.Unmarshal(rec.Body.Bytes(), &updaterRollout); err != nil {
-		t.Fatalf("decode updater rollout: %v", err)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/rollouts/"+strconv.FormatInt(updaterRollout.ID, 10)+"/system-update-tasks", `{"action":"apply","instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"remark":"下发端内更新器执行"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("queue system update task status %d: %s", rec.Code, rec.Body.String())
-	}
-	var updaterTask ProductSystemUpdateTask
-	if err := json.Unmarshal(rec.Body.Bytes(), &updaterTask); err != nil {
-		t.Fatalf("decode system update task: %v", err)
-	}
-	if updaterTask.ID == 0 || updaterTask.ExecutionID == 0 || updaterTask.Status != "queued" || updaterTask.DownloadURL == "" || updaterTask.UpdaterTokenHint == "" {
-		t.Fatalf("unexpected queued system update task: %+v", updaterTask)
-	}
-	rec = testRequest(t, app, "", http.MethodGet, "/api/product-ops/system-updates/tasks", "")
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected system update poll without token unauthorized, got %d: %s", rec.Code, rec.Body.String())
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/product-ops/system-updates/tasks", nil)
-	req.Header.Set("X-CBMP-Updater-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("system update poll status %d: %s", rec.Code, rec.Body.String())
-	}
-	var poll productSystemUpdateTaskResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &poll); err != nil {
-		t.Fatalf("decode system update poll: %v", err)
-	}
-	if !poll.Accepted || len(poll.Tasks) == 0 || poll.Tasks[0].TaskNo != updaterTask.TaskNo || poll.Tasks[0].Status != "assigned" {
-		t.Fatalf("expected assigned system update task: %+v", poll)
-	}
-	req = httptest.NewRequest(http.MethodGet, updaterTask.DownloadURL, nil)
-	req.Header.Set("X-CBMP-Updater-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("system update package download status %d: %s", rec.Code, rec.Body.String())
-	}
-	var updaterDownload UpdatePackageDownload
-	if err := json.Unmarshal(rec.Body.Bytes(), &updaterDownload); err != nil {
-		t.Fatalf("decode system update download: %v", err)
-	}
-	if !updaterDownload.Verified || updaterDownload.Package.ID != updaterUpdate.ID || updaterDownload.Package.Checksum != updaterTask.Checksum {
-		t.Fatalf("expected authorized update package download: %+v", updaterDownload)
-	}
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/system-updates/tasks/"+updaterTask.TaskNo+"/report", bytes.NewBufferString(`{"status":"running","progress":45,"step":"install","message":"端内更新器正在安装"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Updater-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("system update running report status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &updaterTask); err != nil {
-		t.Fatalf("decode running system update report: %v", err)
-	}
-	if updaterTask.Status != "running" || updaterTask.Progress < 45 || len(updaterTask.Logs) < 3 {
-		t.Fatalf("expected running system update task: %+v", updaterTask)
-	}
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/system-updates/tasks/"+updaterTask.TaskNo+"/report", bytes.NewBufferString(`{"status":"succeeded","progress":100,"step":"health_check","message":"端内更新器完成更新并通过健康检查","currentVersion":"1.0.3","updaterVersion":"updater-1.0.0"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Updater-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("system update success report status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &updaterTask); err != nil {
-		t.Fatalf("decode succeeded system update report: %v", err)
-	}
-	if updaterTask.Status != "succeeded" || updaterTask.Progress != 100 || updaterTask.CompletedAt == "" {
-		t.Fatalf("expected succeeded system update task: %+v", updaterTask)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview after updater status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode product ops overview after updater: %v", err)
-	}
-	foundUpdaterUpdatedInstance := false
-	for _, item := range overview.Instances {
-		if item.ID == instance.ID {
-			foundUpdaterUpdatedInstance = item.ClientVersion == updaterUpdate.Version
-			break
-		}
-	}
-	if !foundUpdaterUpdatedInstance || len(overview.SystemUpdateTasks) == 0 || overview.KPIs.SystemUpdateTasks == 0 {
-		t.Fatalf("expected system update overview and version sync: %+v", overview.KPIs)
-	}
-
-	probeBody := `{"component":"server","clientVersion":"1.0.1","serverVersion":"1.0.1","status":"critical","cpuPercent":92,"memoryPercent":77,"diskPercent":91,"queueBacklog":1400,"errorCount":12,"message":"服务端队列积压"}`
-	rec = testRequest(t, app, "", http.MethodPost, "/api/product-ops/probes/report", probeBody)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected probe without token unauthorized, got %d: %s", rec.Code, rec.Body.String())
-	}
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/probes/report", bytes.NewBufferString(probeBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Probe-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("probe report status %d: %s", rec.Code, rec.Body.String())
-	}
-	var probe productProbeReportResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &probe); err != nil {
-		t.Fatalf("decode probe report: %v", err)
-	}
-	if !probe.Accepted || probe.Report.ID == 0 || !probe.Report.AlertRaised || probe.Alert == nil || probe.Instance.Status != "degraded" {
-		t.Fatalf("expected probe report to raise alert and degrade instance: %+v", probe)
-	}
-
-	recoverBody := `{"component":"server","clientVersion":"1.0.3","serverVersion":"1.0.1","status":"healthy","cpuPercent":42,"memoryPercent":55,"diskPercent":61,"queueBacklog":10,"errorCount":0,"message":"指标恢复正常"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/probes/report", bytes.NewBufferString(recoverBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Probe-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("probe recovery status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &probe); err != nil {
-		t.Fatalf("decode probe recovery: %v", err)
-	}
-	if probe.Report.AlertRaised || probe.Instance.Status != "online" || probe.Instance.HealthStatus != "healthy" {
-		t.Fatalf("expected probe recovery to restore instance: %+v", probe)
-	}
-
-	telemetryBody := `{"source":"trace","component":"server","severity":"error","eventType":"http_500","traceId":"trace-sw-500","endpoint":"/api/dispatch","durationMs":4200,"statusCode":500,"errorMessage":"调度接口返回 500","message":"客户现场链路追踪异常"}`
-	rec = testRequest(t, app, "", http.MethodPost, "/api/product-ops/telemetry/report", telemetryBody)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected telemetry without token unauthorized, got %d: %s", rec.Code, rec.Body.String())
-	}
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/telemetry/report", bytes.NewBufferString(telemetryBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Probe-Token", instance.ProbeToken)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("telemetry report status %d: %s", rec.Code, rec.Body.String())
-	}
-	var telemetry productTelemetryReportResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &telemetry); err != nil {
-		t.Fatalf("decode telemetry report: %v", err)
-	}
-	if !telemetry.Accepted || telemetry.Event.ID == 0 || !telemetry.Event.AlertRaised || telemetry.Alert == nil || telemetry.Alert.Source != "telemetry" || telemetry.Instance.Status != "degraded" {
-		t.Fatalf("expected telemetry event to raise alert and degrade instance: %+v", telemetry)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/monitoring/integrations", `{"name":"测试 Prometheus 接入","code":"test-prometheus","provider":"prometheus-test","token":"mon-test-prometheus","status":"active","remark":"HTTP webhook"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save monitoring integration status %d: %s", rec.Code, rec.Body.String())
-	}
-	var monitoringIntegration ProductMonitoringIntegration
-	if err := json.Unmarshal(rec.Body.Bytes(), &monitoringIntegration); err != nil {
-		t.Fatalf("decode monitoring integration: %v", err)
-	}
-	if monitoringIntegration.ID == 0 || monitoringIntegration.Token == "" || monitoringIntegration.Status != "active" {
-		t.Fatalf("unexpected monitoring integration: %+v", monitoringIntegration)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/monitoring/rules", `{"name":"测试服务端 CPU 告警","source":"prometheus-test","component":"server","metric":"cpu_percent","operator":">=","threshold":88,"severity":"critical","status":"active","notifyChannels":["sse","webhook"]}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save product alert rule status %d: %s", rec.Code, rec.Body.String())
-	}
-	var alertRule ProductAlertRule
-	if err := json.Unmarshal(rec.Body.Bytes(), &alertRule); err != nil {
-		t.Fatalf("decode product alert rule: %v", err)
-	}
-	if alertRule.ID == 0 || alertRule.RuleNo == "" || alertRule.Metric != "cpu_percent" {
-		t.Fatalf("unexpected product alert rule: %+v", alertRule)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/policies", `{"name":"测试监控聚合抑制","source":"monitoring","component":"server","metric":"cpu_percent","severity":"warning","aggregateWindowMinutes":60,"suppressMinutes":20,"escalateAfterMinutes":0,"escalateTo":"on_call","notifyChannels":["sse","webhook"],"status":"active"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save alert policy status %d: %s", rec.Code, rec.Body.String())
-	}
-	var alertPolicy ProductAlertPolicy
-	if err := json.Unmarshal(rec.Body.Bytes(), &alertPolicy); err != nil {
-		t.Fatalf("decode alert policy: %v", err)
-	}
-	if alertPolicy.ID == 0 || alertPolicy.PolicyNo == "" || alertPolicy.AggregateWindowMinutes != 60 {
-		t.Fatalf("unexpected alert policy: %+v", alertPolicy)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/channels", `{"name":"测试短信通道","code":"sms","type":"sms","endpoint":"mock://fail","status":"active","retryLimit":3,"timeoutSeconds":1,"remark":"先模拟失败，后续重试成功"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save alert channel status %d: %s", rec.Code, rec.Body.String())
-	}
-	var alertChannel ProductAlertChannel
-	if err := json.Unmarshal(rec.Body.Bytes(), &alertChannel); err != nil {
-		t.Fatalf("decode alert channel: %v", err)
-	}
-	if alertChannel.ID == 0 || alertChannel.ChannelNo == "" || alertChannel.Type != "sms" {
-		t.Fatalf("unexpected alert channel: %+v", alertChannel)
-	}
-
-	monitoringBody := `{"integrationCode":"test-prometheus","watermark":"` + instance.Watermark + `","provider":"prometheus-test","source":"prometheus-test","component":"server","metric":"cpu_percent","value":96.5,"severity":"warning","status":"firing","title":"Prometheus CPU 告警","message":"CPU 96.5%"}`
-	rec = testRequest(t, app, "", http.MethodPost, "/api/product-ops/monitoring/report", monitoringBody)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected monitoring without token unauthorized, got %d: %s", rec.Code, rec.Body.String())
-	}
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/monitoring/report", bytes.NewBufferString(monitoringBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Monitoring-Token", monitoringIntegration.Token)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("monitoring report status %d: %s", rec.Code, rec.Body.String())
-	}
-	var monitoring productMonitoringReportResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &monitoring); err != nil {
-		t.Fatalf("decode monitoring report: %v", err)
-	}
-	if !monitoring.Accepted || monitoring.Event.ID == 0 || !monitoring.Event.AlertRaised || monitoring.Event.MatchedRuleNo != alertRule.RuleNo || monitoring.Alert == nil || monitoring.Alert.Source != "monitoring" {
-		t.Fatalf("expected monitoring event to match rule and raise alert: %+v", monitoring)
-	}
-	firstMonitoringAlertID := monitoring.Alert.ID
-	req = httptest.NewRequest(http.MethodPost, "/api/product-ops/monitoring/report", bytes.NewBufferString(monitoringBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Monitoring-Token", monitoringIntegration.Token)
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("second monitoring report status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &monitoring); err != nil {
-		t.Fatalf("decode second monitoring report: %v", err)
-	}
-	if monitoring.Alert == nil || monitoring.Alert.ID != firstMonitoringAlertID || monitoring.Alert.EventCount < 2 || monitoring.Alert.SuppressedUntil == "" || monitoring.Alert.PolicyNo != alertPolicy.PolicyNo {
-		t.Fatalf("expected monitoring alert to aggregate and suppress: %+v", monitoring.Alert)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/policies", `{"name":"测试服务端升级策略","source":"server","component":"server","metric":"all","severity":"warning","aggregateWindowMinutes":60,"suppressMinutes":0,"escalateAfterMinutes":1,"escalateTo":"duty_manager","notifyChannels":["sse"],"status":"active"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save server alert policy status %d: %s", rec.Code, rec.Body.String())
-	}
-	var serverPolicy ProductAlertPolicy
-	if err := json.Unmarshal(rec.Body.Bytes(), &serverPolicy); err != nil {
-		t.Fatalf("decode server alert policy: %v", err)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts", `{"instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"severity":"warning","source":"server","title":"服务端长时间未恢复","message":"客户服务端持续异常","firstSeenAt":"2026-01-01 00:00:00"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create escalated system alert status %d: %s", rec.Code, rec.Body.String())
-	}
-	var escalatedAlert SystemAlert
-	if err := json.Unmarshal(rec.Body.Bytes(), &escalatedAlert); err != nil {
-		t.Fatalf("decode escalated alert: %v", err)
-	}
-	if escalatedAlert.EscalationLevel != "duty_manager" || escalatedAlert.EscalatedAt == "" || escalatedAlert.PolicyNo != serverPolicy.PolicyNo {
-		t.Fatalf("expected alert governance to escalate manual alert: %+v", escalatedAlert)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/policies", `{"name":"测试短信失败重试策略","source":"client","component":"client","metric":"all","severity":"warning","aggregateWindowMinutes":60,"suppressMinutes":0,"escalateAfterMinutes":0,"escalateTo":"sms_on_call","notifyChannels":["sms"],"status":"active"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save sms alert policy status %d: %s", rec.Code, rec.Body.String())
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts", `{"instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"severity":"warning","source":"client","title":"客户端同步失败需短信通知","message":"客户客户端同步持续失败"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create sms alert status %d: %s", rec.Code, rec.Body.String())
-	}
-	var smsAlert SystemAlert
-	if err := json.Unmarshal(rec.Body.Bytes(), &smsAlert); err != nil {
-		t.Fatalf("decode sms alert: %v", err)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview after sms alert status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode product ops overview after sms alert: %v", err)
-	}
-	var failedNotification ProductAlertNotification
-	for _, item := range overview.AlertNotifications {
-		if item.AlertNo == smsAlert.AlertNo && item.Channel == "sms" {
-			failedNotification = item
-			break
-		}
-	}
-	if failedNotification.ID == 0 || failedNotification.Status != "failed" || failedNotification.Error == "" || failedNotification.NextRetryAt == "" {
-		t.Fatalf("expected failed sms notification with retry: %+v", failedNotification)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/channels", `{"id":`+strconv.FormatInt(alertChannel.ID, 10)+`,"name":"测试短信通道","code":"sms","type":"sms","endpoint":"mock://success","status":"active","retryLimit":3,"timeoutSeconds":1,"remark":"修复后重试成功"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("fix alert channel status %d: %s", rec.Code, rec.Body.String())
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/notifications/"+strconv.FormatInt(failedNotification.ID, 10)+"/retry", `{}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("retry alert notification status %d: %s", rec.Code, rec.Body.String())
-	}
-	var retriedNotification ProductAlertNotification
-	if err := json.Unmarshal(rec.Body.Bytes(), &retriedNotification); err != nil {
-		t.Fatalf("decode retried notification: %v", err)
-	}
-	if retriedNotification.Status != "delivered" || retriedNotification.DeliveredAt == "" || retriedNotification.AttemptCount < 2 {
-		t.Fatalf("expected delivered retried notification: %+v", retriedNotification)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals", `{"instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"stage":"合同确认","status":"open","owner":"客户成功-周舟","amount":66000,"currency":"CNY","dueDate":"2026-09-30","nextFollowAt":"2026-06-21 10:00:00","riskLevel":"warning","remark":"测试续费任务"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create renewal task status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewal ProductRenewalTask
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewal); err != nil {
-		t.Fatalf("decode renewal task: %v", err)
-	}
-	if renewal.ID == 0 || renewal.CustomerName != "西南建材客户" || renewal.TaskNo == "" || renewal.Status != "open" {
-		t.Fatalf("unexpected renewal task: %+v", renewal)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/quote", `{"amount":66000,"currency":"CNY","modules":["license","update","support"],"newExpiresAt":"2027-09-30","remark":"续费报价单"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create renewal quote status %d: %s", rec.Code, rec.Body.String())
-	}
-	var quote ProductRenewalQuote
-	if err := json.Unmarshal(rec.Body.Bytes(), &quote); err != nil {
-		t.Fatalf("decode renewal quote: %v", err)
-	}
-	if quote.ID == 0 || quote.TaskID != renewal.ID || quote.Status != "sent" || quote.Amount != 66000 {
-		t.Fatalf("unexpected renewal quote: %+v", quote)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/approval", `{"action":"submit","quoteId":`+strconv.FormatInt(quote.ID, 10)+`,"approvalType":"quote","amount":66000,"currency":"CNY","currentRole":"boss","comment":"续费报价审批"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("submit renewal approval status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewalApproval ProductRenewalApproval
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalApproval); err != nil {
-		t.Fatalf("decode renewal approval: %v", err)
-	}
-	if renewalApproval.ID == 0 || renewalApproval.Status != "pending" || renewalApproval.QuoteID != quote.ID {
-		t.Fatalf("unexpected renewal approval: %+v", renewalApproval)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/approval", `{"action":"approve","approvalId":`+strconv.FormatInt(renewalApproval.ID, 10)+`,"comment":"审批通过"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("approve renewal approval status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalApproval); err != nil {
-		t.Fatalf("decode approved renewal approval: %v", err)
-	}
-	if renewalApproval.Status != "approved" || renewalApproval.ApprovedBy == "" || renewalApproval.ApprovedAt == "" {
-		t.Fatalf("expected approved renewal approval: %+v", renewalApproval)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/contract", `{"quoteId":`+strconv.FormatInt(quote.ID, 10)+`,"remark":"客户确认合同"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create renewal contract status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewalContract ProductRenewalContract
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalContract); err != nil {
-		t.Fatalf("decode renewal contract: %v", err)
-	}
-	if renewalContract.ID == 0 || renewalContract.QuoteID != quote.ID || renewalContract.Status != "signed" || renewalContract.Amount != 66000 {
-		t.Fatalf("unexpected renewal contract: %+v", renewalContract)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/esign", `{"action":"send","contractId":`+strconv.FormatInt(renewalContract.ID, 10)+`,"signer":"客户授权代表","phone":"13800019999","channel":"local_esign","remark":"发送续费电子签"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("send renewal e-sign status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewalESign ProductRenewalESign
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalESign); err != nil {
-		t.Fatalf("decode renewal e-sign: %v", err)
-	}
-	if renewalESign.ID == 0 || renewalESign.Status != "sent" || renewalESign.LinkURL == "" {
-		t.Fatalf("unexpected renewal e-sign: %+v", renewalESign)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/esign", `{"action":"complete","signId":`+strconv.FormatInt(renewalESign.ID, 10)+`,"contractId":`+strconv.FormatInt(renewalContract.ID, 10)+`,"signature":"客户授权代表 电子签名","remark":"客户已完成电子签"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("complete renewal e-sign status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalESign); err != nil {
-		t.Fatalf("decode completed renewal e-sign: %v", err)
-	}
-	if renewalESign.Status != "signed" || renewalESign.SignedAt == "" || renewalESign.Signature == "" {
-		t.Fatalf("expected signed renewal e-sign: %+v", renewalESign)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/payment", `{"contractId":`+strconv.FormatInt(renewalContract.ID, 10)+`,"amount":66000,"currency":"CNY","method":"bank","remark":"续费全额回款"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create renewal payment status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewalPayment ProductRenewalPayment
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalPayment); err != nil {
-		t.Fatalf("decode renewal payment: %v", err)
-	}
-	if renewalPayment.ID == 0 || renewalPayment.ContractID != renewalContract.ID || renewalPayment.Status != "paid" || renewalPayment.Amount != 66000 {
-		t.Fatalf("unexpected renewal payment: %+v", renewalPayment)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/integrations", `{"name":"测试税控网关","code":"tax_gateway","provider":"tax","scenario":"tax","endpoint":"mock://fail","status":"active","retryLimit":3,"timeoutSeconds":1,"remark":"先模拟税控失败"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save renewal tax integration status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewalIntegration ProductRenewalIntegration
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalIntegration); err != nil {
-		t.Fatalf("decode renewal integration: %v", err)
-	}
-	if renewalIntegration.ID == 0 || renewalIntegration.Code != "tax_gateway" || renewalIntegration.Endpoint != "mock://fail" {
-		t.Fatalf("unexpected renewal integration: %+v", renewalIntegration)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/invoice", `{"contractId":`+strconv.FormatInt(renewalContract.ID, 10)+`,"paymentId":`+strconv.FormatInt(renewalPayment.ID, 10)+`,"invoiceType":"blue_e_invoice","taxRate":0.06,"remark":"续费电子发票"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create renewal invoice status %d: %s", rec.Code, rec.Body.String())
-	}
-	var renewalInvoice ProductRenewalInvoice
-	if err := json.Unmarshal(rec.Body.Bytes(), &renewalInvoice); err != nil {
-		t.Fatalf("decode renewal invoice: %v", err)
-	}
-	if renewalInvoice.ID == 0 || renewalInvoice.PaymentID != renewalPayment.ID || renewalInvoice.Status != "issued" || renewalInvoice.TaxStatus != "failed" || renewalInvoice.FileURL == "" {
-		t.Fatalf("unexpected renewal invoice: %+v", renewalInvoice)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview after renewal commercial status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode product ops overview after renewal commercial: %v", err)
-	}
-	if len(overview.RenewalQuotes) == 0 || len(overview.RenewalContracts) == 0 || len(overview.RenewalPayments) == 0 || overview.KPIs.PaidRenewalAmount < 66000 {
-		t.Fatalf("expected renewal commercial overview: %+v", overview.KPIs)
-	}
-	if len(overview.RenewalApprovals) == 0 || len(overview.RenewalESigns) == 0 || len(overview.RenewalInvoices) == 0 || overview.KPIs.IssuedRenewalInvoices == 0 {
-		t.Fatalf("expected renewal enterprise overview: %+v", overview.KPIs)
-	}
-	var failedRenewalSync ProductRenewalSyncRecord
-	for _, item := range overview.RenewalSyncRecords {
-		if item.ResourceType == "invoice" && item.ResourceID == renewalInvoice.ID {
-			failedRenewalSync = item
-			break
-		}
-	}
-	if failedRenewalSync.ID == 0 || failedRenewalSync.Status != "failed" || failedRenewalSync.Error == "" || failedRenewalSync.NextRetryAt == "" || overview.KPIs.FailedRenewalSyncRecords == 0 {
-		t.Fatalf("expected failed renewal tax sync: record=%+v kpis=%+v", failedRenewalSync, overview.KPIs)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/integrations", `{"id":`+strconv.FormatInt(renewalIntegration.ID, 10)+`,"name":"测试税控网关","code":"tax_gateway","provider":"tax","scenario":"tax","endpoint":"mock://success","status":"active","retryLimit":3,"timeoutSeconds":1,"remark":"修复后重试成功"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("fix renewal tax integration status %d: %s", rec.Code, rec.Body.String())
-	}
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/sync-records/"+strconv.FormatInt(failedRenewalSync.ID, 10)+"/retry", `{}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("retry renewal sync status %d: %s", rec.Code, rec.Body.String())
-	}
-	var retriedRenewalSync ProductRenewalSyncRecord
-	if err := json.Unmarshal(rec.Body.Bytes(), &retriedRenewalSync); err != nil {
-		t.Fatalf("decode retried renewal sync: %v", err)
-	}
-	if retriedRenewalSync.Status != "succeeded" || retriedRenewalSync.CompletedAt == "" || retriedRenewalSync.AttemptCount < 2 {
-		t.Fatalf("expected succeeded retried renewal sync: %+v", retriedRenewalSync)
-	}
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("product ops overview after renewal sync retry status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode product ops overview after renewal sync retry: %v", err)
-	}
-	if overview.KPIs.ActiveRenewalIntegrations == 0 || overview.KPIs.RenewalSyncRecords < 3 || overview.KPIs.FailedRenewalSyncRecords != 0 {
-		t.Fatalf("expected renewal integration and sync KPI recovery: %+v", overview.KPIs)
-	}
-	var retriedInvoice ProductRenewalInvoice
-	for _, item := range overview.RenewalInvoices {
-		if item.ID == renewalInvoice.ID {
-			retriedInvoice = item
-			break
-		}
-	}
-	if retriedInvoice.ID == 0 || retriedInvoice.TaxStatus != "accepted" || retriedInvoice.ExternalRequest == "" {
-		t.Fatalf("expected renewal invoice tax status after retry: %+v", retriedInvoice)
-	}
-	if len(overview.MonitoringIntegrations) == 0 || len(overview.AlertRules) == 0 || len(overview.MonitoringEvents) == 0 || overview.KPIs.MonitoringAlerts == 0 {
-		t.Fatalf("expected monitoring overview: %+v", overview.KPIs)
-	}
-	if len(overview.AlertPolicies) == 0 || len(overview.AlertNotifications) == 0 || overview.KPIs.ActiveAlertPolicies == 0 || overview.KPIs.AlertNotifications == 0 || overview.KPIs.SuppressedAlerts == 0 || overview.KPIs.EscalatedAlerts == 0 {
-		t.Fatalf("expected alert governance overview: %+v", overview.KPIs)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/"+strconv.FormatInt(renewal.ID, 10)+"/close", `{"remark":"续费已完成"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("close renewal task status %d: %s", rec.Code, rec.Body.String())
-	}
-	var closedRenewal ProductRenewalTask
-	if err := json.Unmarshal(rec.Body.Bytes(), &closedRenewal); err != nil {
-		t.Fatalf("decode closed renewal task: %v", err)
-	}
-	if closedRenewal.Status != "closed" || closedRenewal.ClosedAt == "" || closedRenewal.Stage != "已续费" {
-		t.Fatalf("expected closed renewal task: %+v", closedRenewal)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts", `{"instanceId":`+strconv.FormatInt(instance.ID, 10)+`,"severity":"critical","source":"server","title":"服务端心跳中断","message":"客户服务端 15 分钟未上报心跳"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create system alert status %d: %s", rec.Code, rec.Body.String())
-	}
-	var alert SystemAlert
-	if err := json.Unmarshal(rec.Body.Bytes(), &alert); err != nil {
-		t.Fatalf("decode system alert: %v", err)
-	}
-	if alert.ID == 0 || alert.CustomerName != "西南建材客户" || alert.Status != "open" {
-		t.Fatalf("unexpected system alert: %+v", alert)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/alerts/"+strconv.FormatInt(alert.ID, 10)+"/handle", `{"remark":"已联系客户重启服务"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("handle system alert status %d: %s", rec.Code, rec.Body.String())
-	}
-	var handled SystemAlert
-	if err := json.Unmarshal(rec.Body.Bytes(), &handled); err != nil {
-		t.Fatalf("decode handled alert: %v", err)
-	}
-	if handled.Status != "handled" || handled.HandledBy == "" {
-		t.Fatalf("expected handled alert with actor: %+v", handled)
-	}
-}
-
-func TestProductRenewalSyncCallbackUpdatesInvoice(t *testing.T) {
-	t.Skip("product operations moved to OperationsPlatform; ERP rejects /api/product-ops/*")
-	app := newTestHTTPApp(t)
-	adminToken := testLogin(t, app, "admin", "admin123")
-
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/integrations", `{"name":"回调税控网关","code":"tax_gateway","provider":"tax","scenario":"tax","endpoint":"mock://fail","secret":"renewal-callback-secret","status":"active","retryLimit":3,"timeoutSeconds":1}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("save renewal callback integration status %d: %s", rec.Code, rec.Body.String())
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/product-ops/renewals/1/invoice", `{"contractId":1,"paymentId":1,"invoiceType":"blue_e_invoice","taxRate":0.06,"remark":"回调测试发票"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create renewal callback invoice status %d: %s", rec.Code, rec.Body.String())
-	}
-	var invoice ProductRenewalInvoice
-	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
-		t.Fatalf("decode renewal callback invoice: %v", err)
-	}
-	if invoice.TaxStatus != "failed" {
-		t.Fatalf("expected tax sync failure before callback: %+v", invoice)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("overview before renewal callback status %d: %s", rec.Code, rec.Body.String())
-	}
-	var overview ProductOpsOverview
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode overview before renewal callback: %v", err)
-	}
-	var failedSync ProductRenewalSyncRecord
-	for _, item := range overview.RenewalSyncRecords {
-		if item.ResourceType == "invoice" && item.ResourceID == invoice.ID {
-			failedSync = item
-			break
-		}
-	}
-	if failedSync.ID == 0 || failedSync.Status != "failed" {
-		t.Fatalf("expected failed sync before callback: %+v", failedSync)
-	}
-
-	callback := []byte(`{"syncNo":"` + failedSync.SyncNo + `","status":"accepted","externalStatus":"accepted","externalRequestId":"tax-callback-001","fileUrl":"https://tax.example/renewal.pdf"}`)
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	req := httptest.NewRequest(http.MethodPost, "/api/product-ops/renewals/sync-callback", bytes.NewReader(callback))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CBMP-Timestamp", timestamp)
-	req.Header.Set("X-CBMP-Signature", taxGatewaySignature("renewal-callback-secret", timestamp, callback))
-	rec = httptest.NewRecorder()
-	app.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("renewal sync callback status %d: %s", rec.Code, rec.Body.String())
-	}
-	var callbackSync ProductRenewalSyncRecord
-	if err := json.Unmarshal(rec.Body.Bytes(), &callbackSync); err != nil {
-		t.Fatalf("decode renewal callback sync: %v", err)
-	}
-	if callbackSync.Status != "succeeded" || callbackSync.ExternalRequestID != "tax-callback-001" || callbackSync.CompletedAt == "" {
-		t.Fatalf("expected callback to succeed sync record: %+v", callbackSync)
-	}
-
-	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/product-ops/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("overview after renewal callback status %d: %s", rec.Code, rec.Body.String())
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
-		t.Fatalf("decode overview after renewal callback: %v", err)
-	}
-	var updatedInvoice ProductRenewalInvoice
-	for _, item := range overview.RenewalInvoices {
-		if item.ID == invoice.ID {
-			updatedInvoice = item
-			break
-		}
-	}
-	if updatedInvoice.ID == 0 || updatedInvoice.TaxStatus != "accepted" || updatedInvoice.ExternalRequest != "tax-callback-001" {
-		t.Fatalf("expected callback to update invoice: %+v", updatedInvoice)
 	}
 }
 
@@ -2957,6 +2703,18 @@ func TestFieldPoliciesAreConfigurable(t *testing.T) {
 		t.Fatalf("expected configurable dispatcher customer phone masking, got %+v", bootstrap.Customers)
 	}
 
+	rec = testRequest(t, app, adminToken, http.MethodPut, "/api/system/field-policies/"+strconv.FormatInt(policy.ID, 10), `{"roleCode":"dispatcher","resource":"customers","field":"phone","mask":"redact","remark":"调度隐藏客户电话"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update field policy status %d: %s", rec.Code, rec.Body.String())
+	}
+	var updatedPolicy FieldPolicy
+	if err := json.Unmarshal(rec.Body.Bytes(), &updatedPolicy); err != nil {
+		t.Fatalf("decode updated field policy: %v", err)
+	}
+	if updatedPolicy.ID != policy.ID || updatedPolicy.Mask != "redact" || updatedPolicy.Remark != "调度隐藏客户电话" || !updatedPolicy.Enabled {
+		t.Fatalf("expected updated field policy with original enabled state, got %+v", updatedPolicy)
+	}
+
 	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/field-policies/"+strconv.FormatInt(policy.ID, 10)+"/toggle", `{"enabled":false}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("toggle field policy status %d: %s", rec.Code, rec.Body.String())
@@ -2978,6 +2736,24 @@ func TestFieldPoliciesAreConfigurable(t *testing.T) {
 	}
 	if !hasFieldPolicy(security.FieldPolicies, policy.ID) {
 		t.Fatalf("expected system security to expose field policy, got %+v", security.FieldPolicies)
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/field-policies/"+strconv.FormatInt(policy.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete field policy status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/security", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("system security after delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	security = struct {
+		FieldPolicies []FieldPolicy `json:"fieldPolicies"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &security); err != nil {
+		t.Fatalf("decode system security after delete: %v", err)
+	}
+	if hasFieldPolicy(security.FieldPolicies, policy.ID) {
+		t.Fatalf("deleted field policy still exposed in system security: %+v", security.FieldPolicies)
 	}
 }
 
@@ -3009,6 +2785,11 @@ func TestApprovalFlowsAndDictionariesAreConfigurable(t *testing.T) {
 		t.Fatalf("unexpected approval flow: %+v", flow)
 	}
 
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/approval-flows/"+strconv.FormatInt(flow.ID, 10), "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "启用中的审批流不能删除") {
+		t.Fatalf("active approval flow delete should be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
 	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/approval-flows", `{"code":"quality_exception","name":"质量异常二级审批","resource":"quality_inspection","steps":[{"seq":1,"roleCode":"quality","action":"approve"},{"seq":2,"roleCode":"boss","action":"approve"}],"status":"draft"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("update approval flow status %d: %s", rec.Code, rec.Body.String())
@@ -3030,6 +2811,30 @@ func TestApprovalFlowsAndDictionariesAreConfigurable(t *testing.T) {
 	}
 	if updatedFlow.Status != "disabled" {
 		t.Fatalf("expected disabled approval flow, got %+v", updatedFlow)
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/approval-flows/"+strconv.FormatInt(flow.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete disabled approval flow status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/approval-flows", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approval flows after delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	flows = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &flows); err != nil {
+		t.Fatalf("decode approval flows after delete: %v", err)
+	}
+	for _, item := range flows {
+		if item.ID == flow.ID {
+			t.Fatalf("deleted approval flow still listed: %+v", item)
+		}
+	}
+	snapshot := app.mustSnapshot()
+	for _, item := range snapshot.WorkflowDefinitions {
+		if item.Category == workflowCategoryApproval && item.Code == flow.Code {
+			t.Fatalf("deleted approval flow still has workflow definition: %+v", item)
+		}
 	}
 
 	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/dictionaries", "")
@@ -3077,6 +2882,37 @@ func TestApprovalFlowsAndDictionariesAreConfigurable(t *testing.T) {
 	}
 	if updatedDictionary.Status != "disabled" {
 		t.Fatalf("expected disabled dictionary, got %+v", updatedDictionary)
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/dictionaries", `{"type":"product_line","code":"temporary_delete_guard","label":"临时启用项","sort":99,"status":"active"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create active dictionary status %d: %s", rec.Code, rec.Body.String())
+	}
+	var activeDictionary DataDictionary
+	if err := json.Unmarshal(rec.Body.Bytes(), &activeDictionary); err != nil {
+		t.Fatalf("decode active dictionary: %v", err)
+	}
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/dictionaries/"+strconv.FormatInt(activeDictionary.ID, 10), "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "启用中的字典项不能删除") {
+		t.Fatalf("active dictionary delete should be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodDelete, "/api/system/dictionaries/"+strconv.FormatInt(dictionary.ID, 10), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete disabled dictionary status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = testRequest(t, app, adminToken, http.MethodGet, "/api/system/dictionaries", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dictionaries after delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	dictionaries = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &dictionaries); err != nil {
+		t.Fatalf("decode dictionaries after delete: %v", err)
+	}
+	for _, item := range dictionaries {
+		if item.ID == dictionary.ID {
+			t.Fatalf("deleted dictionary still listed: %+v", item)
+		}
 	}
 }
 
@@ -3378,6 +3214,19 @@ func TestDeviceKeyCanReportLocationWithDeviceScope(t *testing.T) {
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected device mismatch forbidden, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestForwarderDeviceKeyCanRelayMultipleGPSDevices(t *testing.T) {
+	app := newTestHTTPApp(t)
+	for _, body := range []string{
+		`{"channel":"http","protocol":"gps-json","raw":"{\"deviceNo\":\"GPS1000001\",\"plateNo\":\"粤B12345\",\"longitude\":113.95,\"latitude\":22.53,\"speed\":35,\"direction\":120,\"mileage\":123500,\"accStatus\":1}"}`,
+		`{"channel":"http","protocol":"gps-json","raw":"{\"deviceNo\":\"GPS1000002\",\"plateNo\":\"粤B22336\",\"longitude\":113.96,\"latitude\":22.54,\"speed\":28,\"direction\":90,\"mileage\":8568,\"accStatus\":1}"}`,
+	} {
+		rec := testDeviceRequest(t, app, "gps-forwarder-demo-key", http.MethodPost, "/api/iot/protocols/gps/ingest", body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("forwarder gps ingest status %d: %s", rec.Code, rec.Body.String())
+		}
 	}
 }
 

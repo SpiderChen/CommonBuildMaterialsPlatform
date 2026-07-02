@@ -48,6 +48,17 @@ func (a *App) createRedLetterInfo(w http.ResponseWriter, r *http.Request, sessio
 		}
 		item.Remark = strings.TrimSpace(req.Remark)
 		data.RedLetterInfos = append(data.RedLetterInfos, item)
+		if event, instances, err := publishRedLetterInfoWorkflow(data, item, session.User.Username); err != nil {
+			return err
+		} else if event.Status == "handled" || len(instances) > 0 {
+			for i := range data.RedLetterInfos {
+				if data.RedLetterInfos[i].ID == item.ID {
+					data.RedLetterInfos[i].Status = "pending_approval"
+					item = data.RedLetterInfos[i]
+					break
+				}
+			}
+		}
 		addAudit(data, session.User.Username, "create", "red_letter_info", item.ID, item.InfoNo, clientIP(r))
 		return nil
 	})
@@ -81,19 +92,66 @@ func (a *App) approveRedLetterInfo(w http.ResponseWriter, r *http.Request, sessi
 		if err := validateOriginalInvoiceForRedLetter(original); err != nil {
 			return err
 		}
-		current.Status = "approved"
-		current.ApprovedBy = fallback(req.ApprovedBy, fallback(session.User.DisplayName, session.User.Username))
-		current.ApprovedAt = nowString()
-		current.TaxControlNo = fallback(req.TaxControlNo, fallback(current.TaxControlNo, number("RLITAX", current.ID)))
-		if req.Remark != "" {
-			current.Remark = strings.TrimSpace(req.Remark)
+		if hasPendingWorkflowForResource(*data, "red_letter_info", id) {
+			return fmt.Errorf("红字信息表正在工作流审批中，请在工作流中处理")
 		}
-		data.RedLetterInfos[index] = current
-		item = current
+		approvedBy := fallback(req.ApprovedBy, fallback(session.User.DisplayName, session.User.Username))
+		next, err := approveRedLetterInfoLocked(data, id, approvedBy, req.TaxControlNo, req.Remark)
+		if err != nil {
+			return err
+		}
+		item = next
 		addAudit(data, session.User.Username, "approve", "red_letter_info", item.ID, item.InfoNo, clientIP(r))
 		return nil
 	})
 	a.respondMutation(w, err, item, "finance.red_letter.approved")
+}
+
+func publishRedLetterInfoWorkflow(data *AppData, item RedLetterInfo, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "red_letter_info.requested",
+		Source:     "finance",
+		EventKey:   "red_letter_info:" + item.InfoNo,
+		Resource:   "red_letter_info",
+		ResourceID: item.ID,
+		ResourceNo: item.InfoNo,
+		Title:      "红字信息表 " + item.InfoNo,
+		Actor:      actor,
+		Reason:     item.Reason,
+		Variables: map[string]string{
+			"originalInvoiceId": fmt.Sprintf("%d", item.OriginalInvoiceID),
+			"customerId":        fmt.Sprintf("%d", item.CustomerID),
+			"amount":            fmt.Sprintf("%.2f", item.Amount),
+			"taxAmount":         fmt.Sprintf("%.2f", item.TaxAmount),
+		},
+	})
+}
+
+func approveRedLetterInfoLocked(data *AppData, id int64, approvedBy string, taxControlNo string, remark string) (RedLetterInfo, error) {
+	index := redLetterInfoIndex(*data, id)
+	if index < 0 {
+		return RedLetterInfo{}, fmt.Errorf("红字信息表不存在")
+	}
+	current := data.RedLetterInfos[index]
+	if current.Status == "used" {
+		return RedLetterInfo{}, fmt.Errorf("红字信息表已被红票使用")
+	}
+	original, ok := findSalesInvoice(*data, current.OriginalInvoiceID)
+	if !ok {
+		return RedLetterInfo{}, fmt.Errorf("原发票不存在")
+	}
+	if err := validateOriginalInvoiceForRedLetter(original); err != nil {
+		return RedLetterInfo{}, err
+	}
+	current.Status = "approved"
+	current.ApprovedBy = fallback(approvedBy, current.Applicant)
+	current.ApprovedAt = nowString()
+	current.TaxControlNo = fallback(taxControlNo, fallback(current.TaxControlNo, number("RLITAX", current.ID)))
+	if remark != "" {
+		current.Remark = strings.TrimSpace(remark)
+	}
+	data.RedLetterInfos[index] = current
+	return current, nil
 }
 
 func ensureRedLetterInfoForRedOffset(data *AppData, original SalesInvoice, requestedID int64, reason, actor string) (RedLetterInfo, error) {
@@ -118,7 +176,7 @@ func ensureRedLetterInfoForRedOffset(data *AppData, original SalesInvoice, reque
 		if item.OriginalInvoiceID == original.ID && item.Status == "approved" && item.RedInvoiceID == 0 {
 			return item, nil
 		}
-		if item.OriginalInvoiceID == original.ID && item.Status == "requested" {
+		if item.OriginalInvoiceID == original.ID && (item.Status == "requested" || item.Status == "pending_approval") {
 			return RedLetterInfo{}, fmt.Errorf("该发票已有待审批红字信息表")
 		}
 	}
@@ -223,7 +281,7 @@ func redInvoiceCategory(originalCategory string) string {
 func dataDictionariesByType(data AppData, typ string) []DataDictionary {
 	items := make([]DataDictionary, 0)
 	for _, item := range data.DataDictionaries {
-		if item.Type == typ && item.Status != "disabled" {
+		if item.Type == typ && (item.Status == "" || item.Status == "active") {
 			items = append(items, item)
 		}
 	}

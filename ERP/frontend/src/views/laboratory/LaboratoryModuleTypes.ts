@@ -2,6 +2,7 @@ import type { FormEvent } from "react";
 
 export type LaboratoryModuleKey =
   | "mix-designs"
+  | "plant-mix-designs"
   | "trial-runs"
   | "sample-tests"
   | "equipment-calibration"
@@ -12,6 +13,12 @@ export type SubmitHandler = (event: FormEvent<HTMLFormElement>) => void | Promis
 
 export type MutateAction = (label: string, action: () => Promise<unknown>) => Promise<void>;
 
+export type MixMaterialForm = {
+  materialId: string;
+  dosage: string;
+  unit: string;
+};
+
 export type MixForm = {
   productId: string;
   siteId: string;
@@ -20,7 +27,7 @@ export type MixForm = {
   strengthGrade: string;
   slump: string;
   scope: string;
-  materials: string;
+  materials: MixMaterialForm[];
 };
 
 export type TrialForm = {
@@ -74,4 +81,6 @@ export type ExceptionForm = {
   severity: string;
   responsible: string;
   description: string;
+  rootCause: string;
+  correctiveAction: string;
 };

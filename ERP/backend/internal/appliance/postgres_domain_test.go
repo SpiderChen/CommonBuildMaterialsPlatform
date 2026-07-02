@@ -25,7 +25,7 @@ func TestDomainRowsRoundTripTopLevelAppDataResources(t *testing.T) {
 		}
 		seen[row.Resource]++
 	}
-	for _, resource := range []string{"schemaVersion", "license", "next", "modules", "users", "orders", "salesInvoices", "taxGatewaySubmissions", "inventory", "auditLogs"} {
+	for _, resource := range []string{"schemaVersion", "license", "next", "modules", "users", "orders", "salesInvoices", "inventory", "auditLogs"} {
 		if seen[resource] == 0 {
 			t.Fatalf("expected domain resource %s in rows", resource)
 		}
@@ -45,8 +45,11 @@ func TestDomainRowsRoundTripTopLevelAppDataResources(t *testing.T) {
 	if len(restored.SalesInvoices) != len(data.SalesInvoices) || restored.SalesInvoices[0].InvoiceType != "blue" {
 		t.Fatalf("restored invoices mismatch: %+v", restored.SalesInvoices)
 	}
-	if len(restored.TaxGatewaySubmissions) != len(data.TaxGatewaySubmissions) || restored.TaxGatewaySubmissions[0].Action != "issue" {
+	if len(restored.TaxGatewaySubmissions) != len(data.TaxGatewaySubmissions) {
 		t.Fatalf("restored tax submissions mismatch: %+v", restored.TaxGatewaySubmissions)
+	}
+	if len(data.TaxGatewaySubmissions) > 0 && restored.TaxGatewaySubmissions[0].Action != "issue" {
+		t.Fatalf("restored tax submission payload mismatch: %+v", restored.TaxGatewaySubmissions[0])
 	}
 	if restored.Next["invoice"] != data.Next["invoice"] || restored.Next["taxSubmission"] != data.Next["taxSubmission"] {
 		t.Fatalf("restored Next map mismatch: %+v", restored.Next)

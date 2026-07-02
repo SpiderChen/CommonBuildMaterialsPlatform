@@ -89,7 +89,7 @@ func (a *App) createQualityInspection(w http.ResponseWriter, r *http.Request, se
 		item.ProductID = batch.ProductID
 		item.MixDesignID = batch.MixDesignID
 		item.Inspector = fallback(req.Inspector, session.User.DisplayName)
-		item.Slump = fallback(req.Slump, "180mm")
+		item.Slump = fallback(req.Slump, "油石比 5.1%")
 		item.SampleCount = 2
 		item.Result = "pending"
 		item.Status = "sampling"
@@ -128,12 +128,12 @@ func (a *App) testQualitySample(w http.ResponseWriter, r *http.Request, session 
 			break
 		}
 		if !found {
-			return fmt.Errorf("试块不存在")
+			return fmt.Errorf("试样不存在")
 		}
 		refreshQualityInspection(data, item.InspectionID)
 		updateLaboratorySampleFromQualitySample(data, item)
 		if item.Result == "failed" {
-			appendQualityException(data, "quality_sample", item.ID, sampleSiteID(*data, item), "试块强度不合格", "试块 "+item.SampleNo+" 试验结果不合格", "high", session.User.DisplayName)
+			appendQualityException(data, "quality_sample", item.ID, sampleSiteID(*data, item), "试样指标不合格", "试样 "+item.SampleNo+" 试验结果不合格", "high", session.User.DisplayName)
 		}
 		addAudit(data, session.User.Username, "test", "quality_sample", item.ID, item.SampleNo, clientIP(r))
 		return nil
@@ -185,27 +185,75 @@ func (a *App) reviewRawMaterialInspection(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid raw material inspection review")
 		return
 	}
-	var item RawMaterialInspection
+	var response interface{}
+	topic := "quality.raw_inspection.reviewed"
 	err := a.store.Mutate(func(data *AppData) error {
-		found := false
-		for i := range data.RawMaterialInspections {
-			if data.RawMaterialInspections[i].ID != inspectionID {
-				continue
-			}
-			data.RawMaterialInspections[i].Moisture = nonZero(req.Moisture, data.RawMaterialInspections[i].Moisture)
-			data.RawMaterialInspections[i].MudContent = nonZero(req.MudContent, data.RawMaterialInspections[i].MudContent)
-			data.RawMaterialInspections[i].Fineness = fallback(req.Fineness, data.RawMaterialInspections[i].Fineness)
-			data.RawMaterialInspections[i].Result = fallback(req.Result, rawInspectionResult(data.RawMaterialInspections[i]))
-			data.RawMaterialInspections[i].Status = "completed"
-			data.RawMaterialInspections[i].CompletedAt = nowString()
-			data.RawMaterialInspections[i].Remark = fallback(req.Remark, data.RawMaterialInspections[i].Remark)
-			item = data.RawMaterialInspections[i]
-			found = true
-			break
-		}
-		if !found {
+		item, ok := findRawMaterialInspection(*data, inspectionID)
+		if !ok {
 			return fmt.Errorf("原料质检单不存在")
 		}
+		_, instances, err := publishRawMaterialInspectionReviewWorkflow(data, item, req, session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			response = instances[0]
+			topic = "quality.raw_inspection.workflow_requested"
+			addAudit(data, session.User.Username, "request_review", "raw_material_inspection", item.ID, item.InspectionNo, clientIP(r))
+			return nil
+		}
+		next, err := applyRawMaterialInspectionReviewLocked(data, inspectionID, req, session.User.DisplayName)
+		if err != nil {
+			return err
+		}
+		response = next
+		addAudit(data, session.User.Username, "review", "raw_material_inspection", next.ID, next.InspectionNo, clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, response, topic)
+}
+
+func publishRawMaterialInspectionReviewWorkflow(data *AppData, item RawMaterialInspection, req RawMaterialInspection, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	result := fallback(req.Result, rawInspectionResult(item))
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "raw_material_inspection.review_requested",
+		Source:     "quality",
+		Resource:   "raw_material_inspection",
+		ResourceID: item.ID,
+		ResourceNo: item.InspectionNo,
+		Title:      "原料质检复核",
+		Actor:      actor,
+		Reason:     fallback(req.Remark, fmt.Sprintf("原料质检单 %s 复核为 %s", item.InspectionNo, result)),
+		Variables: map[string]string{
+			"receiptId":    strconv.FormatInt(item.ReceiptID, 10),
+			"receiptNo":    item.ReceiptNo,
+			"siteId":       strconv.FormatInt(item.SiteID, 10),
+			"materialId":   strconv.FormatInt(item.MaterialID, 10),
+			"supplierId":   strconv.FormatInt(item.SupplierID, 10),
+			"moisture":     strconv.FormatFloat(req.Moisture, 'f', 4, 64),
+			"mudContent":   strconv.FormatFloat(req.MudContent, 'f', 4, 64),
+			"fineness":     req.Fineness,
+			"result":       result,
+			"remark":       req.Remark,
+			"inspector":    item.Inspector,
+			"existingMark": item.Remark,
+		},
+	})
+}
+
+func applyRawMaterialInspectionReviewLocked(data *AppData, inspectionID int64, req RawMaterialInspection, actor string) (RawMaterialInspection, error) {
+	for i := range data.RawMaterialInspections {
+		if data.RawMaterialInspections[i].ID != inspectionID {
+			continue
+		}
+		data.RawMaterialInspections[i].Moisture = nonZero(req.Moisture, data.RawMaterialInspections[i].Moisture)
+		data.RawMaterialInspections[i].MudContent = nonZero(req.MudContent, data.RawMaterialInspections[i].MudContent)
+		data.RawMaterialInspections[i].Fineness = fallback(req.Fineness, data.RawMaterialInspections[i].Fineness)
+		data.RawMaterialInspections[i].Result = fallback(req.Result, rawInspectionResult(data.RawMaterialInspections[i]))
+		data.RawMaterialInspections[i].Status = "completed"
+		data.RawMaterialInspections[i].CompletedAt = nowString()
+		data.RawMaterialInspections[i].Remark = fallback(req.Remark, data.RawMaterialInspections[i].Remark)
+		item := data.RawMaterialInspections[i]
 		availableStatus := "available"
 		if item.Result == "failed" {
 			availableStatus = "blocked"
@@ -214,12 +262,11 @@ func (a *App) reviewRawMaterialInspection(w http.ResponseWriter, r *http.Request
 		updateInventoryQualityStatus(data, item.SiteID, item.MaterialID, item.Result, availableStatus)
 		updateLaboratorySampleFromRawInspection(data, item)
 		if item.Result == "failed" {
-			appendQualityException(data, "raw_material_inspection", item.ID, item.SiteID, "原料检验不合格", "原料质检单 "+item.InspectionNo+" 复核为不合格", "high", session.User.DisplayName)
+			appendQualityException(data, "raw_material_inspection", item.ID, item.SiteID, "原料检验不合格", "原料质检单 "+item.InspectionNo+" 复核为不合格", "high", actor)
 		}
-		addAudit(data, session.User.Username, "review", "raw_material_inspection", item.ID, item.InspectionNo, clientIP(r))
-		return nil
-	})
-	a.respondMutation(w, err, item, "quality.raw_inspection.reviewed")
+		return item, nil
+	}
+	return RawMaterialInspection{}, fmt.Errorf("原料质检单不存在")
 }
 
 func defaultQualitySamples(data *AppData, inspection QualityInspection, batchCompletedAt string) []QualitySample {
@@ -316,6 +363,15 @@ func findRawMaterialReceipt(data AppData, id int64) (RawMaterialReceipt, bool) {
 		}
 	}
 	return RawMaterialReceipt{}, false
+}
+
+func findRawMaterialInspection(data AppData, id int64) (RawMaterialInspection, bool) {
+	for _, item := range data.RawMaterialInspections {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return RawMaterialInspection{}, false
 }
 
 func hasRawMaterialInspection(data AppData, receiptID int64) bool {

@@ -1,5 +1,12 @@
 package appliance
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+)
+
 func ensureEnterpriseDefaults(data *AppData) bool {
 	seed := SeedData()
 	changed := false
@@ -11,6 +18,7 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		data.Next = map[string]int64{}
 		changed = true
 	}
+	shouldBackfillIntegrationEndpoints := len(data.IntegrationEndpoints) == 0 && data.Next["integration"] == 0 && data.Next["integrationEndpoint"] == 0
 	for key, value := range seed.Next {
 		if data.Next[key] < value {
 			data.Next[key] = value
@@ -18,6 +26,19 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		}
 	}
 	if normalizeStandaloneOperationPlatform(data) {
+		changed = true
+	}
+	if !demoSeedEnabled() {
+		if purgeDemoBusinessSeed(data, seed) {
+			changed = true
+		}
+		if ensureRuntimeDefaults(data, seed) {
+			changed = true
+		}
+		return changed
+	}
+	if data.GroupProfile.Name == "" {
+		data.GroupProfile = seed.GroupProfile
 		changed = true
 	}
 	if len(data.Companies) == 0 {
@@ -28,6 +49,23 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		if data.Companies[i].Status == "" {
 			data.Companies[i].Status = "active"
 			changed = true
+		}
+		for _, company := range seed.Companies {
+			if company.ID != data.Companies[i].ID {
+				continue
+			}
+			if data.Companies[i].Level == "" {
+				data.Companies[i].Level = company.Level
+				changed = true
+			}
+			if data.Companies[i].Region == "" {
+				data.Companies[i].Region = company.Region
+				changed = true
+			}
+			if data.Companies[i].ParentID == 0 && company.ParentID != 0 {
+				data.Companies[i].ParentID = company.ParentID
+				changed = true
+			}
 		}
 	}
 	if len(data.Departments) == 0 {
@@ -84,6 +122,12 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 	if len(data.Carriers) == 0 {
 		data.Carriers = seed.Carriers
 		changed = true
+	}
+	for i := range data.Vehicles {
+		if data.Vehicles[i].InternalNo == "" {
+			data.Vehicles[i].InternalNo = fmt.Sprintf("V%03d", data.Vehicles[i].ID)
+			changed = true
+		}
 	}
 	if len(data.VehicleDevices) == 0 {
 		data.VehicleDevices = seed.VehicleDevices
@@ -233,6 +277,10 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		changed = true
 	}
 	for i := range data.ProductInstances {
+		if hasDemoCredential(data.ProductInstances[i].ProbeToken) {
+			data.ProductInstances[i].ProbeToken = productProbeToken(data.ProductInstances[i])
+			changed = true
+		}
 		if data.ProductInstances[i].ProbeToken == "" {
 			data.ProductInstances[i].ProbeToken = productProbeToken(data.ProductInstances[i])
 			data.ProductInstances[i].ProbeEnabled = true
@@ -242,6 +290,12 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 			data.ProductInstances[i].HealthStatus = fallback(data.ProductInstances[i].Status, "unknown")
 			changed = true
 		}
+	}
+	if sanitizeDeliveryLicenseDefaults(data) {
+		changed = true
+	}
+	if sanitizeDeliveryExternalDefaults(data) {
+		changed = true
 	}
 	if len(data.FieldPolicies) == 0 {
 		data.FieldPolicies = seed.FieldPolicies
@@ -267,6 +321,26 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 	}
 	if len(data.InventoryFlows) == 0 {
 		data.InventoryFlows = seed.InventoryFlows
+		changed = true
+	}
+	if len(data.PlantBufferLocations) == 0 {
+		data.PlantBufferLocations = seed.PlantBufferLocations
+		changed = true
+	}
+	if len(data.PlantBufferFlows) == 0 {
+		data.PlantBufferFlows = seed.PlantBufferFlows
+		changed = true
+	}
+	if len(data.StockYards) == 0 {
+		data.StockYards = seed.StockYards
+		changed = true
+	}
+	if len(data.StockYardPiles) == 0 {
+		data.StockYardPiles = seed.StockYardPiles
+		changed = true
+	}
+	if len(data.StockYardFlows) == 0 {
+		data.StockYardFlows = seed.StockYardFlows
 		changed = true
 	}
 	if len(data.DispatchSchedules) == 0 {
@@ -407,23 +481,31 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		data.Notifications = seed.Notifications
 		changed = true
 	}
-	if len(data.IntegrationEndpoints) == 0 {
+	if shouldBackfillIntegrationEndpoints {
 		data.IntegrationEndpoints = seed.IntegrationEndpoints
 		changed = true
 	}
-	for _, endpoint := range seed.IntegrationEndpoints {
-		if endpoint.Type != "collection" {
-			continue
-		}
-		found := false
-		for _, existing := range data.IntegrationEndpoints {
-			if existing.Type == endpoint.Type && existing.Protocol == endpoint.Protocol {
-				found = true
-				break
+	if shouldBackfillIntegrationEndpoints {
+		for _, endpoint := range seed.IntegrationEndpoints {
+			if endpoint.Type != "collection" {
+				continue
+			}
+			found := false
+			for _, existing := range data.IntegrationEndpoints {
+				if existing.Type == endpoint.Type && existing.Protocol == endpoint.Protocol {
+					found = true
+					break
+				}
+			}
+			if !found {
+				data.IntegrationEndpoints = append(data.IntegrationEndpoints, endpoint)
+				changed = true
 			}
 		}
-		if !found {
-			data.IntegrationEndpoints = append(data.IntegrationEndpoints, endpoint)
+	}
+	for _, endpoint := range data.IntegrationEndpoints {
+		if data.Next["integration"] < endpoint.ID {
+			ensureCounterAtLeast(data, "integration", endpoint.ID)
 			changed = true
 		}
 	}
@@ -449,6 +531,10 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		changed = true
 	}
 	for _, item := range seed.DataDictionaries {
+		if data.Next == nil || data.Next["dict"] < item.ID {
+			ensureCounterAtLeast(data, "dict", item.ID)
+			changed = true
+		}
 		if !hasDataDictionaryDefault(data.DataDictionaries, item.Type, item.Code) {
 			data.DataDictionaries = append(data.DataDictionaries, item)
 			changed = true
@@ -497,13 +583,14 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 		}
 	}
 	for i := range data.Roles {
-		for _, role := range seed.Roles {
-			if role.Code == data.Roles[i].Code && len(data.Roles[i].Permissions) < len(role.Permissions) {
-				data.Roles[i].Permissions = role.Permissions
-				data.Roles[i].DataScope = role.DataScope
-				changed = true
-			}
+		scope := normalizeDataScope(data.Roles[i].DataScope)
+		if data.Roles[i].DataScope != scope {
+			data.Roles[i].DataScope = scope
+			changed = true
 		}
+	}
+	if ensureBuiltinRolePermissions(data, "quality", "approval:read", "approval:write") {
+		changed = true
 	}
 	for _, role := range seed.Roles {
 		found := false
@@ -531,6 +618,175 @@ func ensureEnterpriseDefaults(data *AppData) bool {
 			changed = true
 		}
 	}
+	if ensureBuiltinAdminSuperAdmin(data) {
+		changed = true
+	}
+	return changed
+}
+
+func ensureRuntimeDefaults(data *AppData, seed AppData) bool {
+	changed := false
+	if data.GroupProfile.Name == "" {
+		data.GroupProfile = unconfiguredGroupProfile()
+		changed = true
+	}
+	if len(data.Modules) == 0 {
+		data.Modules = seed.Modules
+		changed = true
+	}
+	if len(data.Plugins) == 0 {
+		data.Plugins = seed.Plugins
+		changed = true
+	}
+	if len(data.SecurityPolicies) == 0 {
+		data.SecurityPolicies = seed.SecurityPolicies
+		changed = true
+	}
+	if len(data.GatewayRoutes) == 0 {
+		data.GatewayRoutes = seed.GatewayRoutes
+		changed = true
+	}
+	if len(data.DataDictionaries) == 0 {
+		data.DataDictionaries = seed.DataDictionaries
+		changed = true
+	}
+	for _, item := range seed.DataDictionaries {
+		if data.Next == nil || data.Next["dict"] < item.ID {
+			ensureCounterAtLeast(data, "dict", item.ID)
+			changed = true
+		}
+		if !hasDataDictionaryDefault(data.DataDictionaries, item.Type, item.Code) {
+			data.DataDictionaries = append(data.DataDictionaries, item)
+			changed = true
+		}
+	}
+	if sanitizeDeliveryLicenseDefaults(data) {
+		changed = true
+	}
+	if sanitizeProductInstanceDefaults(data) {
+		changed = true
+	}
+	if sanitizeDeliveryExternalDefaults(data) {
+		changed = true
+	}
+	if ensureBuiltinRolePermissions(data, "quality", "approval:read", "approval:write") {
+		changed = true
+	}
+	if ensureBuiltinAdminSuperAdmin(data) {
+		changed = true
+	}
+	return changed
+}
+
+func sanitizeProductInstanceDefaults(data *AppData) bool {
+	changed := false
+	for i := range data.ProductInstances {
+		if hasDemoCredential(data.ProductInstances[i].ProbeToken) {
+			data.ProductInstances[i].ProbeToken = productProbeToken(data.ProductInstances[i])
+			changed = true
+		}
+		if data.ProductInstances[i].ProbeToken == "" {
+			data.ProductInstances[i].ProbeToken = productProbeToken(data.ProductInstances[i])
+			data.ProductInstances[i].ProbeEnabled = true
+			changed = true
+		}
+		if data.ProductInstances[i].HealthStatus == "" {
+			data.ProductInstances[i].HealthStatus = fallback(data.ProductInstances[i].Status, "unknown")
+			changed = true
+		}
+	}
+	return changed
+}
+
+func productProbeToken(instance ProductInstance) string {
+	seed := strings.Join([]string{"probe", instance.Watermark, instance.LicenseID, instance.CustomerName}, "|")
+	sum := sha256.Sum256([]byte(seed))
+	return "probe-" + hex.EncodeToString(sum[:])[:24]
+}
+
+const (
+	builtinAdminUsername      = "admin"
+	builtinSuperAdminRoleCode = "boss"
+	builtinSuperAdminRoleName = "超级管理员"
+)
+
+func ensureBuiltinAdminSuperAdmin(data *AppData) bool {
+	changed := false
+	foundRole := false
+	for i := range data.Roles {
+		if data.Roles[i].Code != builtinSuperAdminRoleCode {
+			continue
+		}
+		foundRole = true
+		if data.Roles[i].Name != builtinSuperAdminRoleName {
+			data.Roles[i].Name = builtinSuperAdminRoleName
+			changed = true
+		}
+		if !hasOnlyWildcardPermission(data.Roles[i].Permissions) {
+			data.Roles[i].Permissions = []string{"*"}
+			changed = true
+		}
+		if normalizeDataScope(data.Roles[i].DataScope) != "group" {
+			data.Roles[i].DataScope = "group"
+			changed = true
+		}
+	}
+	if !foundRole {
+		data.Roles = append(data.Roles, builtinSuperAdminRole(nextID(data, "role")))
+		changed = true
+	}
+	foundAdmin := false
+	for i := range data.Users {
+		if data.Users[i].Username != builtinAdminUsername {
+			continue
+		}
+		foundAdmin = true
+		if data.Users[i].DisplayName != builtinSuperAdminRoleName {
+			data.Users[i].DisplayName = builtinSuperAdminRoleName
+			changed = true
+		}
+		if data.Users[i].RoleCode != builtinSuperAdminRoleCode {
+			data.Users[i].RoleCode = builtinSuperAdminRoleCode
+			changed = true
+		}
+	}
+	if !foundAdmin {
+		admin := initialAdminUser(nil)
+		admin.ID = nextID(data, "user")
+		data.Users = append(data.Users, admin)
+		changed = true
+	}
+	return changed
+}
+
+func builtinSuperAdminRole(id int64) Role {
+	return Role{
+		ID:          id,
+		Code:        builtinSuperAdminRoleCode,
+		Name:        builtinSuperAdminRoleName,
+		Permissions: []string{"*"},
+		DataScope:   "group",
+	}
+}
+
+func hasOnlyWildcardPermission(items []string) bool {
+	return len(items) == 1 && items[0] == "*"
+}
+
+func ensureBuiltinRolePermissions(data *AppData, roleCode string, permissions ...string) bool {
+	changed := false
+	for i := range data.Roles {
+		if data.Roles[i].Code != roleCode || permissionGranted(data.Roles[i].Permissions, "*") {
+			continue
+		}
+		for _, permission := range permissions {
+			if permissionGranted(data.Roles[i].Permissions, permission) {
+				continue
+			}
+			data.Roles[i].Permissions = append(data.Roles[i].Permissions, permission)
+			changed = true
+		}
+	}
 	return changed
 }
 
@@ -545,8 +801,9 @@ func normalizeStandaloneOperationPlatform(data *AppData) bool {
 		changed = true
 	}
 	for i := range data.Roles {
-		if data.Roles[i].DataScope == "tenant" {
-			data.Roles[i].DataScope = "platform"
+		scope := normalizeDataScope(data.Roles[i].DataScope)
+		if data.Roles[i].DataScope != scope {
+			data.Roles[i].DataScope = scope
 			changed = true
 		}
 	}
@@ -571,6 +828,14 @@ func normalizeStandaloneOperationPlatform(data *AppData) bool {
 	for i := range data.SCIMProviders {
 		if data.SCIMProviders[i].TenantID != 0 {
 			data.SCIMProviders[i].TenantID = 0
+			changed = true
+		}
+		if hasDemoCredential(data.SCIMProviders[i].BearerToken) {
+			data.SCIMProviders[i].BearerToken = ""
+			if data.SCIMProviders[i].Status == "enabled" {
+				data.SCIMProviders[i].Status = "disabled"
+			}
+			data.SCIMProviders[i].LastSyncAt = ""
 			changed = true
 		}
 	}
@@ -620,6 +885,223 @@ func hasSecurityPolicyID(items []SecurityPolicy, id int64) bool {
 		}
 	}
 	return false
+}
+
+func sanitizeDeliveryExternalDefaults(data *AppData) bool {
+	changed := false
+	for i := range data.DeviceCredentials {
+		item := &data.DeviceCredentials[i]
+		knownDemoKey := hasKnownDemoDeviceCredentialHash(item.KeyHash)
+		activeWithoutKey := item.Status == "active" && strings.TrimSpace(item.KeyHash) == ""
+		if !knownDemoKey && !activeWithoutKey {
+			continue
+		}
+		if item.KeyHash != "" && knownDemoKey {
+			item.KeyHash = ""
+			changed = true
+		}
+		if item.Status == "active" {
+			item.Status = "disabled"
+			changed = true
+		}
+		if item.LastUsedAt != "" {
+			item.LastUsedAt = ""
+			changed = true
+		}
+	}
+	for i := range data.ProductRenewalIntegrations {
+		item := &data.ProductRenewalIntegrations[i]
+		if !hasMockEndpoint(item.Endpoint) && !hasDemoCredential(item.Token) && !hasDemoCredential(item.Secret) {
+			continue
+		}
+		if item.Endpoint != "" {
+			item.Endpoint = ""
+			changed = true
+		}
+		if item.Token != "" {
+			item.Token = ""
+			changed = true
+		}
+		if item.Secret != "" {
+			item.Secret = ""
+			changed = true
+		}
+		if item.Status == "active" {
+			item.Status = "disabled"
+			changed = true
+		}
+		if item.LastSyncAt != "" {
+			item.LastSyncAt = ""
+			changed = true
+		}
+		if item.LastError == "" {
+			item.LastError = "待配置真实 " + fallback(item.Scenario, "external") + " endpoint"
+			changed = true
+		}
+	}
+	for i := range data.ProductMonitoringIntegrations {
+		item := &data.ProductMonitoringIntegrations[i]
+		if !hasMockEndpoint(item.Endpoint) && !hasDemoCredential(item.Token) {
+			continue
+		}
+		if item.Endpoint != "" {
+			item.Endpoint = ""
+			changed = true
+		}
+		if item.Token != "" {
+			item.Token = ""
+			changed = true
+		}
+		if item.Status == "active" {
+			item.Status = "disabled"
+			changed = true
+		}
+		if item.LastEventAt != "" {
+			item.LastEventAt = ""
+			changed = true
+		}
+	}
+	for i := range data.ProductAlertChannels {
+		item := &data.ProductAlertChannels[i]
+		external := item.Type != "sse" && item.Type != "local"
+		invalidActiveExternal := external && item.Status == "active" && strings.TrimSpace(item.Endpoint) == ""
+		if !hasMockEndpoint(item.Endpoint) && !hasDemoCredential(item.Token) && !hasDemoCredential(item.Secret) && !invalidActiveExternal {
+			continue
+		}
+		if item.Endpoint != "" && (hasMockEndpoint(item.Endpoint) || invalidActiveExternal) {
+			item.Endpoint = ""
+			changed = true
+		}
+		if hasDemoCredential(item.Token) {
+			item.Token = ""
+			changed = true
+		}
+		if hasDemoCredential(item.Secret) {
+			item.Secret = ""
+			changed = true
+		}
+		if item.Status == "active" && external {
+			item.Status = "disabled"
+			changed = true
+		}
+		if item.LastDeliveredAt != "" {
+			item.LastDeliveredAt = ""
+			changed = true
+		}
+		if item.LastError == "" && external {
+			item.LastError = "待配置真实 " + fallback(item.Type, item.Code) + " endpoint"
+			changed = true
+		}
+	}
+	for i := range data.IntegrationEndpoints {
+		item := &data.IntegrationEndpoints[i]
+		if !hasMockEndpoint(item.URL) {
+			continue
+		}
+		item.URL = ""
+		if item.Status == "online" {
+			item.Status = "standby"
+		}
+		item.LastSyncAt = ""
+		changed = true
+	}
+	activeChannels := activeProductAlertChannels(*data)
+	for i := range data.ProductAlertRules {
+		next, ok := sanitizeNotifyChannels(data.ProductAlertRules[i].NotifyChannels, activeChannels)
+		if ok {
+			data.ProductAlertRules[i].NotifyChannels = next
+			changed = true
+		}
+	}
+	for i := range data.ProductAlertPolicies {
+		next, ok := sanitizeNotifyChannels(data.ProductAlertPolicies[i].NotifyChannels, activeChannels)
+		if ok {
+			data.ProductAlertPolicies[i].NotifyChannels = next
+			changed = true
+		}
+	}
+	return changed
+}
+
+func sanitizeDeliveryLicenseDefaults(data *AppData) bool {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.License.LicenseID)), "local-demo") &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.License.Signature)), "local-demo") {
+		return false
+	}
+	data.License = LicenseInfo{
+		CustomerName:          "待导入授权客户",
+		Edition:               fallback(data.License.Edition, "ERP Appliance"),
+		LastVerificationState: "missing",
+		LastVerificationError: "待导入客户授权包",
+	}
+	return true
+}
+
+func hasMockEndpoint(endpoint string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(endpoint))
+	return strings.HasPrefix(normalized, "mock://") ||
+		strings.HasPrefix(normalized, "tax://") ||
+		strings.Contains(normalized, "local-simulator")
+}
+
+func hasDemoCredential(value string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(value)), "demo")
+}
+
+func hasKnownDemoDeviceCredentialHash(keyHash string) bool {
+	switch strings.TrimSpace(keyHash) {
+	case sha256Hex("device-demo-key-1"),
+		sha256Hex("device-demo-key-2"),
+		sha256Hex("device-demo-key-3"),
+		sha256Hex("driver-app-demo-key"),
+		sha256Hex("scale-demo-key-1"),
+		sha256Hex("plant-demo-key-1"),
+		sha256Hex("gps-forwarder-demo-key"):
+		return true
+	default:
+		return false
+	}
+}
+
+func activeProductAlertChannels(data AppData) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range data.ProductAlertChannels {
+		if item.Status != "active" {
+			continue
+		}
+		if code := strings.TrimSpace(item.Code); code != "" {
+			out[code] = true
+		}
+		if typ := strings.TrimSpace(item.Type); typ != "" {
+			out[typ] = true
+		}
+	}
+	return out
+}
+
+func sanitizeNotifyChannels(channels []string, activeChannels map[string]bool) ([]string, bool) {
+	next := []string{}
+	seen := map[string]bool{}
+	for _, channel := range channels {
+		channel = strings.TrimSpace(channel)
+		if channel == "" || seen[channel] || !activeChannels[channel] {
+			continue
+		}
+		seen[channel] = true
+		next = append(next, channel)
+	}
+	if len(next) == 0 && activeChannels["sse"] {
+		next = []string{"sse"}
+	}
+	if len(next) != len(channels) {
+		return next, true
+	}
+	for i := range next {
+		if next[i] != channels[i] {
+			return next, true
+		}
+	}
+	return channels, false
 }
 
 func hasDataDictionaryDefault(items []DataDictionary, typ, code string) bool {

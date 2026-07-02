@@ -17,9 +17,9 @@ import (
 const backupMagic = "CBMP-BACKUP1\n"
 
 type BackupInfo struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-	Size int64 `json:"size"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
 	CreatedAt string `json:"createdAt"`
 }
 
@@ -48,9 +48,9 @@ func (b *BackupManager) Create(data AppData) (BackupInfo, error) {
 		return BackupInfo{}, err
 	}
 	payload := map[string]interface{}{
-		"createdAt": nowString(),
+		"createdAt":     nowString(),
 		"schemaVersion": data.SchemaVersion,
-		"data": data,
+		"data":          data,
 	}
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -118,6 +118,7 @@ func (b *BackupManager) Restore(name string) (AppData, error) {
 		payload.Data.Next = map[string]int64{}
 	}
 	ensureEnterpriseDefaults(&payload.Data)
+	ensureWorkflowDefaults(&payload.Data)
 	return payload.Data, nil
 }
 

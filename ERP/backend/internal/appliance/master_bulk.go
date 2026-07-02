@@ -97,6 +97,16 @@ func buildMasterDataExport(data AppData, resource string) (MasterDataExport, err
 		for _, item := range data.Materials {
 			result.Rows = append(result.Rows, map[string]any{"id": item.ID, "name": item.Name, "spec": item.Spec, "unit": item.Unit, "safeStock": item.SafeStock, "status": item.Status})
 		}
+	case "plants":
+		result.Fields = []string{"id", "siteId", "name", "code", "capacity", "status"}
+		for _, item := range data.Plants {
+			result.Rows = append(result.Rows, map[string]any{"id": item.ID, "siteId": item.SiteID, "name": item.Name, "code": item.Code, "capacity": item.Capacity, "status": item.Status})
+		}
+	case "plant-buffer-locations":
+		result.Fields = []string{"id", "siteId", "plantId", "code", "name", "type", "materialId", "capacity", "unit", "currentQty", "warningQty", "moistureRate", "qualityStatus", "status"}
+		for _, item := range data.PlantBufferLocations {
+			result.Rows = append(result.Rows, map[string]any{"id": item.ID, "siteId": item.SiteID, "plantId": item.PlantID, "code": item.Code, "name": item.Name, "type": item.Type, "materialId": item.MaterialID, "capacity": item.Capacity, "unit": item.Unit, "currentQty": item.CurrentQty, "warningQty": item.WarningQty, "moistureRate": item.MoistureRate, "qualityStatus": item.QualityStatus, "status": item.Status})
+		}
 	case "vehicles":
 		result.Fields = []string{"id", "plateNo", "vehicleType", "capacity", "carrier", "siteId", "driverId", "onlineStatus", "businessStatus", "certExpiresAt", "status"}
 		for _, item := range data.Vehicles {
@@ -145,8 +155,8 @@ func importMasterDataRow(data *AppData, resource string, mode string, row map[st
 		if strings.TrimSpace(item.Name) == "" {
 			return false, false, fmt.Errorf("产品名称不能为空")
 		}
-		item.Line = fallback(item.Line, "concrete")
-		item.Unit = fallback(item.Unit, "m3")
+		item.Line = fallback(item.Line, "asphalt")
+		item.Unit = fallback(item.Unit, "t")
 		item.Status = fallback(item.Status, "active")
 		if mode == "upsert" && item.ID != 0 {
 			for i := range data.Products {
@@ -180,6 +190,66 @@ func importMasterDataRow(data *AppData, resource string, mode string, row map[st
 		item.ID = nextID(data, "material")
 		data.Materials = append(data.Materials, item)
 		return true, false, nil
+	case "plants":
+		var item Plant
+		if err := decodeMasterRow(row, &item); err != nil {
+			return false, false, err
+		}
+		if item.SiteID == 0 {
+			return false, false, fmt.Errorf("生产线必须绑定站点")
+		}
+		if _, ok := findSite(*data, item.SiteID); !ok {
+			return false, false, fmt.Errorf("站点不存在")
+		}
+		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Code) == "" {
+			return false, false, fmt.Errorf("生产线名称和编码不能为空")
+		}
+		item.Capacity = fallback(item.Capacity, "0")
+		item.Interface = ""
+		item.Status = fallback(item.Status, "running")
+		if mode == "upsert" && item.ID != 0 {
+			for i := range data.Plants {
+				if data.Plants[i].ID == item.ID {
+					data.Plants[i] = item
+					return false, true, nil
+				}
+			}
+		}
+		item.ID = nextID(data, "plant")
+		data.Plants = append(data.Plants, item)
+		return true, false, nil
+	case "plant-buffer-locations":
+		var item PlantBufferLocation
+		if err := decodeMasterRow(row, &item); err != nil {
+			return false, false, err
+		}
+		existingIndex := -1
+		var current PlantBufferLocation
+		if mode == "upsert" && item.ID != 0 {
+			for i := range data.PlantBufferLocations {
+				if data.PlantBufferLocations[i].ID == item.ID {
+					existingIndex = i
+					current = data.PlantBufferLocations[i]
+					break
+				}
+			}
+		}
+		normalized, err := normalizePlantBufferLocation(*data, User{Username: "import"}, item, current)
+		if err != nil {
+			return false, false, err
+		}
+		normalized.CurrentQty = round(item.CurrentQty)
+		normalized.CreatedAt = fallback(item.CreatedAt, nowString())
+		normalized.UpdatedAt = nowString()
+		if existingIndex >= 0 {
+			normalized.ID = item.ID
+			normalized.CreatedAt = current.CreatedAt
+			data.PlantBufferLocations[existingIndex] = normalized
+			return false, true, nil
+		}
+		normalized.ID = nextID(data, "plantBuffer")
+		data.PlantBufferLocations = append(data.PlantBufferLocations, normalized)
+		return true, false, nil
 	case "vehicles":
 		var item Vehicle
 		if err := decodeMasterRow(row, &item); err != nil {
@@ -187,6 +257,9 @@ func importMasterDataRow(data *AppData, resource string, mode string, row map[st
 		}
 		if strings.TrimSpace(item.PlateNo) == "" {
 			return false, false, fmt.Errorf("车牌号不能为空")
+		}
+		if item.InternalNo == "" && item.ID != 0 {
+			item.InternalNo = fmt.Sprintf("V%03d", item.ID)
 		}
 		item.OnlineStatus = fallback(item.OnlineStatus, "offline")
 		item.BusinessStatus = fallback(item.BusinessStatus, "idle")
@@ -200,6 +273,9 @@ func importMasterDataRow(data *AppData, resource string, mode string, row map[st
 			}
 		}
 		item.ID = nextID(data, "vehicle")
+		if item.InternalNo == "" {
+			item.InternalNo = fmt.Sprintf("V%03d", item.ID)
+		}
 		data.Vehicles = append(data.Vehicles, item)
 		return true, false, nil
 	case "drivers":

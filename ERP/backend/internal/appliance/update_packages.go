@@ -212,12 +212,16 @@ func signUpdatePackage(item UpdatePackage) (UpdatePackage, error) {
 	}
 	item.SignaturePublicKey = ""
 	item.SignatureKeyFingerprint = ""
-	item.Signature = signUpdatePackageHMAC(item)
+	secret := updateSigningSecret()
+	if secret == "" {
+		return item, fmt.Errorf("更新包 HMAC 签名需要配置 CBMP_UPDATE_SIGNING_SECRET 或 Ed25519 私钥")
+	}
+	item.Signature = signUpdatePackageHMAC(item, secret)
 	return item, nil
 }
 
-func signUpdatePackageHMAC(item UpdatePackage) string {
-	mac := hmac.New(sha256.New, []byte(updateSigningSecret()))
+func signUpdatePackageHMAC(item UpdatePackage, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(updatePackageSignaturePayload(item)))
 	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
 }
@@ -228,7 +232,11 @@ func updatePackageVerified(item UpdatePackage) bool {
 		if _, ok := strictUpdateChecksum("sha256:" + expected); !ok {
 			return false
 		}
-		return hmac.Equal([]byte(expected), []byte(strings.TrimPrefix(signUpdatePackageHMAC(item), "hmac-sha256:")))
+		secret := updateSigningSecret()
+		if secret == "" {
+			return false
+		}
+		return hmac.Equal([]byte(expected), []byte(strings.TrimPrefix(signUpdatePackageHMAC(item, secret), "hmac-sha256:")))
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.Signature)), "ed25519:") {
 		publicKey, err := decodeUpdatePublicKey(item.SignaturePublicKey)
@@ -265,7 +273,7 @@ func updateSigningSecret() string {
 	if value := strings.TrimSpace(os.Getenv("CBMP_UPDATE_SIGNING_SECRET")); value != "" {
 		return value
 	}
-	return "cbmp-demo-update-signing-secret"
+	return ""
 }
 
 func updateSigningPrivateKey() (ed25519.PrivateKey, bool, error) {

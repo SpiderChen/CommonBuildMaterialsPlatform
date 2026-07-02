@@ -100,6 +100,95 @@ func mixDesignMatchesSite(item MixDesign, siteID int64) bool {
 	return item.SiteID == siteID || item.SiteID == 0 || siteID == 0
 }
 
+func productionMixDesignForPlant(data AppData, productID, siteID, plantID int64, planDate string) (MixDesign, MixDesignPlantProfile, bool) {
+	base, ok := approvedMixDesign(data, productID, siteID)
+	if !ok {
+		return MixDesign{}, MixDesignPlantProfile{}, false
+	}
+	if profile, ok := currentMixDesignPlantProfile(data, base.ID, plantID, planDate); ok {
+		return applyMixDesignPlantProfile(base, profile), profile, true
+	}
+	return base, MixDesignPlantProfile{}, true
+}
+
+func productionMixDesignByIDs(data AppData, mixDesignID, profileID, plantID int64, planDate string) (MixDesign, MixDesignPlantProfile, bool) {
+	base, ok := findMixDesign(data, mixDesignID)
+	if !ok {
+		return MixDesign{}, MixDesignPlantProfile{}, false
+	}
+	if profileID > 0 {
+		if profile, ok := findMixDesignPlantProfile(data, profileID); ok && profile.MixDesignID == base.ID {
+			return applyMixDesignPlantProfile(base, profile), profile, true
+		}
+	}
+	if profile, ok := currentMixDesignPlantProfile(data, base.ID, plantID, planDate); ok {
+		return applyMixDesignPlantProfile(base, profile), profile, true
+	}
+	return base, MixDesignPlantProfile{}, true
+}
+
+func currentMixDesignPlantProfile(data AppData, mixDesignID, plantID int64, planDate string) (MixDesignPlantProfile, bool) {
+	for _, item := range data.MixDesignPlantProfiles {
+		if mixDesignPlantProfileMatches(item, mixDesignID, plantID, planDate) && item.IsCurrent {
+			return item, true
+		}
+	}
+	for _, item := range data.MixDesignPlantProfiles {
+		if mixDesignPlantProfileMatches(item, mixDesignID, plantID, planDate) {
+			return item, true
+		}
+	}
+	return MixDesignPlantProfile{}, false
+}
+
+func mixDesignPlantProfileMatches(item MixDesignPlantProfile, mixDesignID, plantID int64, planDate string) bool {
+	if item.MixDesignID != mixDesignID || item.PlantID != plantID || item.Status != "approved" {
+		return false
+	}
+	if planDate != "" {
+		if item.EffectiveFrom != "" && item.EffectiveFrom > planDate {
+			return false
+		}
+		if item.EffectiveTo != "" && item.EffectiveTo < planDate {
+			return false
+		}
+	}
+	return true
+}
+
+func findMixDesignPlantProfile(data AppData, id int64) (MixDesignPlantProfile, bool) {
+	for _, item := range data.MixDesignPlantProfiles {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return MixDesignPlantProfile{}, false
+}
+
+func applyMixDesignPlantProfile(base MixDesign, profile MixDesignPlantProfile) MixDesign {
+	applied := base
+	applied.Version = fallback(profile.Version, base.Version)
+	applied.Scope = fallback(profile.Scope, base.Scope)
+	applied.Materials = append([]MixDesignMaterial(nil), base.Materials...)
+	for _, override := range profile.Materials {
+		for i := range applied.Materials {
+			if applied.Materials[i].MaterialID != override.MaterialID {
+				continue
+			}
+			if override.Dosage > 0 {
+				applied.Materials[i].Dosage = round(override.Dosage)
+			} else if override.Adjustment != 0 {
+				applied.Materials[i].Dosage = round(applied.Materials[i].Dosage + override.Adjustment)
+			}
+			applied.Materials[i].Unit = fallback(override.Unit, applied.Materials[i].Unit)
+			applied.Materials[i].BufferID = override.BufferID
+			applied.Materials[i].BufferCode = override.BufferCode
+			break
+		}
+	}
+	return applied
+}
+
 func inventoryStatus(data AppData) string {
 	for _, item := range data.Inventory {
 		if item.AvailableStatus == "warning" {
@@ -354,6 +443,57 @@ func normalizeGeoFence(fence GeoFence) GeoFence {
 		fence.Radius = 300
 	}
 	return fence
+}
+
+func syncSiteGeoFence(data *AppData, site Site) {
+	if site.ID == 0 || site.Longitude == 0 || site.Latitude == 0 {
+		return
+	}
+	radius := site.FenceRadius
+	name := site.Name + "围栏"
+	for i := range data.GeoFences {
+		if data.GeoFences[i].Type != "site" || data.GeoFences[i].SiteID != site.ID || data.GeoFences[i].Status == "inactive" {
+			continue
+		}
+		if radius <= 0 {
+			radius = normalizeGeoFence(data.GeoFences[i]).Radius
+		}
+		data.GeoFences[i] = GeoFence{
+			ID:        data.GeoFences[i].ID,
+			Name:      name,
+			Type:      "site",
+			SiteID:    site.ID,
+			Longitude: site.Longitude,
+			Latitude:  site.Latitude,
+			Radius:    radius,
+			Shape:     "circle",
+			Status:    "active",
+		}
+		return
+	}
+	if radius <= 0 {
+		radius = 300
+	}
+	data.GeoFences = append(data.GeoFences, GeoFence{
+		ID:        nextID(data, "fence"),
+		Name:      name,
+		Type:      "site",
+		SiteID:    site.ID,
+		Longitude: site.Longitude,
+		Latitude:  site.Latitude,
+		Radius:    radius,
+		Shape:     "circle",
+		Status:    "active",
+	})
+}
+
+func archiveSiteGeoFences(data *AppData, siteID int64) {
+	for i := range data.GeoFences {
+		if data.GeoFences[i].Type == "site" && data.GeoFences[i].SiteID == siteID {
+			data.GeoFences[i] = normalizeGeoFence(data.GeoFences[i])
+			data.GeoFences[i].Status = "inactive"
+		}
+	}
 }
 
 func geoFenceContains(fence GeoFence, longitude, latitude float64) bool {

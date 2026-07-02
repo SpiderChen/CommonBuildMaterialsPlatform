@@ -1,6 +1,8 @@
 package appliance
 
 import (
+	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -114,6 +116,7 @@ func (a *App) sendCollectionTask(w http.ResponseWriter, r *http.Request, session
 	}
 	_ = readJSON(r, &req)
 	var dispatch CollectionDispatch
+	var endpoint IntegrationEndpoint
 	err := a.store.Mutate(func(data *AppData) error {
 		index := collectionTaskIndex(*data, id)
 		if index < 0 {
@@ -143,19 +146,14 @@ func (a *App) sendCollectionTask(w http.ResponseWriter, r *http.Request, session
 		if target == "" {
 			return fmt.Errorf("客户缺少可用催收目标")
 		}
-		endpoint, endpointIndex := ensureCollectionEndpoint(data, channel)
-		content := renderCollectionTemplate(template.Content, task, receivable, customer)
-		status := "delivered"
-		errText := ""
-		if endpoint.Status == "offline" || endpoint.Status == "disabled" || endpoint.Status == "degraded" {
-			status = "failed"
-			errText = "collection endpoint " + endpoint.Status
+		var endpointIndex int
+		endpoint, endpointIndex = ensureCollectionEndpoint(data, channel)
+		if err := validateCollectionEndpointConfigured(endpoint, channel); err != nil {
+			return err
 		}
+		content := renderCollectionTemplate(template.Content, task, receivable, customer)
 		if endpointIndex >= 0 {
 			data.IntegrationEndpoints[endpointIndex].LastSyncAt = nowString()
-			if status == "delivered" {
-				data.IntegrationEndpoints[endpointIndex].Status = "online"
-			}
 		}
 		dispatchID := nextID(data, "collectionDispatch")
 		dispatchNo := number("CD", dispatchID)
@@ -170,8 +168,7 @@ func (a *App) sendCollectionTask(w http.ResponseWriter, r *http.Request, session
 			Content:           content,
 			Endpoint:          endpoint.URL,
 			ProviderRequestID: collectionProviderRequestID(dispatchNo),
-			Status:            status,
-			Error:             errText,
+			Status:            "sending",
 			SentAt:            nowString(),
 			Actor:             fallback(session.User.DisplayName, session.User.Username),
 		}
@@ -179,19 +176,156 @@ func (a *App) sendCollectionTask(w http.ResponseWriter, r *http.Request, session
 		data.CollectionTasks[index].TemplateID = template.ID
 		data.CollectionTasks[index].SendCount++
 		data.CollectionTasks[index].LastSentAt = dispatch.SentAt
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	result := deliverCollectionDispatch(r.Context(), endpoint, dispatch)
+	err = a.store.Mutate(func(data *AppData) error {
+		dispatchIndex := -1
+		for i := range data.CollectionDispatches {
+			if data.CollectionDispatches[i].ID == dispatch.ID {
+				dispatchIndex = i
+				break
+			}
+		}
+		if dispatchIndex < 0 {
+			return fmt.Errorf("催收发送流水不存在")
+		}
+		data.CollectionDispatches[dispatchIndex].Status = result.Status
+		data.CollectionDispatches[dispatchIndex].Error = result.Error
+		data.CollectionDispatches[dispatchIndex].ProviderMessageID = result.ProviderMessageID
+		dispatch = data.CollectionDispatches[dispatchIndex]
+		for i := range data.IntegrationEndpoints {
+			if data.IntegrationEndpoints[i].ID != endpoint.ID {
+				continue
+			}
+			data.IntegrationEndpoints[i].LastSyncAt = nowString()
+			if result.Status == "sent" || result.Status == "delivered" {
+				data.IntegrationEndpoints[i].Status = "online"
+			} else if strings.TrimSpace(endpoint.URL) != "" && data.IntegrationEndpoints[i].Status != "disabled" && data.IntegrationEndpoints[i].Status != "offline" {
+				data.IntegrationEndpoints[i].Status = "degraded"
+			}
+			break
+		}
 		data.Notifications = append(data.Notifications, Notification{
 			ID:         nextID(data, "notification"),
 			TargetRole: "boss",
 			Channel:    "system",
 			Title:      "催收发送" + dispatch.DispatchNo,
-			Content:    content,
+			Content:    dispatch.Content,
 			Status:     "unread",
 			CreatedAt:  dispatch.SentAt,
 		})
-		addAudit(data, session.User.Username, "send", "collection_task", task.ID, dispatch.DispatchNo, clientIP(r))
+		auditAction := "send"
+		if result.Status == "failed" {
+			auditAction = "send_failed"
+		}
+		addAudit(data, session.User.Username, auditAction, "collection_task", id, dispatch.DispatchNo, clientIP(r))
 		return nil
 	})
 	a.respondMutation(w, err, dispatch, "finance.collection.sent")
+}
+
+type collectionDeliveryResult struct {
+	Status            string
+	Error             string
+	ProviderMessageID string
+}
+
+func deliverCollectionDispatch(ctx context.Context, endpoint IntegrationEndpoint, dispatch CollectionDispatch) collectionDeliveryResult {
+	if dispatch.Channel == "phone" {
+		return collectionDeliveryResult{Status: "sent"}
+	}
+	endpointURL := strings.TrimSpace(endpoint.URL)
+	if endpointURL == "" {
+		return collectionDeliveryResult{Status: "failed", Error: collectionEndpointName(dispatch.Channel) + "未配置真实 endpoint"}
+	}
+	if endpoint.Status == "offline" || endpoint.Status == "disabled" {
+		return collectionDeliveryResult{Status: "failed", Error: "collection endpoint " + endpoint.Status}
+	}
+	payload := map[string]interface{}{
+		"requestId":  dispatch.ProviderRequestID,
+		"dispatchNo": dispatch.DispatchNo,
+		"taskId":     dispatch.TaskID,
+		"customerId": dispatch.CustomerID,
+		"channel":    dispatch.Channel,
+		"target":     dispatch.Target,
+		"content":    dispatch.Content,
+		"sentAt":     dispatch.SentAt,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return collectionDeliveryResult{Status: "failed", Error: err.Error()}
+	}
+	timeoutMs := intFromEnv("CBMP_COLLECTION_DELIVERY_TIMEOUT_MS", 5000)
+	if timeoutMs <= 0 {
+		timeoutMs = 5000
+	}
+	client := &http.Client{Timeout: time.Duration(timeoutMs) * time.Millisecond}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(raw))
+	if err != nil {
+		return collectionDeliveryResult{Status: "failed", Error: err.Error()}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "cbmp-collection-dispatcher/1.0")
+	httpReq.Header.Set("X-CBMP-Request-Id", dispatch.ProviderRequestID)
+	httpReq.Header.Set("X-CBMP-Collection-Dispatch", dispatch.DispatchNo)
+	if token := strings.TrimSpace(os.Getenv("CBMP_COLLECTION_PROVIDER_TOKEN")); token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
+	if secret := strings.TrimSpace(os.Getenv("CBMP_COLLECTION_PROVIDER_SECRET")); secret != "" {
+		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+		httpReq.Header.Set("X-CBMP-Timestamp", timestamp)
+		httpReq.Header.Set("X-CBMP-Signature", taxGatewaySignature(secret, timestamp, raw))
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return collectionDeliveryResult{Status: "failed", Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		summary := strings.TrimSpace(string(body))
+		if summary != "" {
+			return collectionDeliveryResult{Status: "failed", Error: fmt.Sprintf("collection endpoint status %d: %s", resp.StatusCode, summary)}
+		}
+		return collectionDeliveryResult{Status: "failed", Error: fmt.Sprintf("collection endpoint status %d", resp.StatusCode)}
+	}
+	result := collectionDeliveryResult{Status: "sent"}
+	if strings.TrimSpace(string(body)) == "" {
+		return result
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return result
+	}
+	result.ProviderMessageID = firstTaxGatewayString(decoded, "providerMessageId", "messageId", "msgId")
+	result.Status = normalizeCollectionProviderAcceptedStatus(firstTaxGatewayString(decoded, "status", "state"))
+	if result.Status == "failed" {
+		result.Error = firstTaxGatewayString(decoded, "error", "message", "msg")
+		if result.Error == "" {
+			result.Error = "collection provider rejected dispatch"
+		}
+	}
+	return result
+}
+
+func normalizeCollectionProviderAcceptedStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "accepted", "sent", "pending", "processing", "success", "ok":
+		return "sent"
+	case "delivered":
+		return "delivered"
+	case "failed", "rejected", "error", "undelivered":
+		return "failed"
+	default:
+		return "sent"
+	}
 }
 
 type collectionCallbackPayload struct {
@@ -460,17 +594,31 @@ func ensureCollectionEndpoint(data *AppData, channel string) (IntegrationEndpoin
 			return item, i
 		}
 	}
+	url := ""
+	status := "standby"
+	lastSyncAt := ""
 	endpoint := IntegrationEndpoint{
 		ID:         nextID(data, "integration"),
 		Name:       collectionEndpointName(channel),
 		Type:       "collection",
 		Protocol:   channel,
-		URL:        "collection://local-simulator/" + channel,
-		Status:     "online",
-		LastSyncAt: nowString(),
+		URL:        url,
+		Status:     status,
+		LastSyncAt: lastSyncAt,
 	}
 	data.IntegrationEndpoints = append(data.IntegrationEndpoints, endpoint)
 	return endpoint, len(data.IntegrationEndpoints) - 1
+}
+
+func validateCollectionEndpointConfigured(endpoint IntegrationEndpoint, channel string) error {
+	if channel == "phone" {
+		return nil
+	}
+	endpointURL := strings.TrimSpace(endpoint.URL)
+	if endpointURL == "" {
+		return fmt.Errorf("%s未配置真实 endpoint", collectionEndpointName(channel))
+	}
+	return validateNoMockEndpoint(endpointURL, collectionEndpointName(channel))
 }
 
 func collectionEndpointName(channel string) string {

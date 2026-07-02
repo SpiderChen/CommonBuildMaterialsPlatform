@@ -11,7 +11,7 @@ func TestQualityInspectionSamplesUpdateBatchStatus(t *testing.T) {
 	app := newTestHTTPApp(t)
 	token := testLogin(t, app, "quality", "quality123")
 
-	rec := testRequest(t, app, token, http.MethodPost, "/api/quality/inspections", `{"batchId":1,"slump":"180mm","temperature":28.5,"remark":"出厂抽检"}`)
+	rec := testRequest(t, app, token, http.MethodPost, "/api/quality/inspections", `{"batchId":1,"slump":"油石比 5.1%","temperature":165,"remark":"出厂抽检"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create quality inspection status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -89,6 +89,88 @@ func TestRawMaterialInspectionReleasesInventory(t *testing.T) {
 	}
 	if !hasInventoryQualityStatus(procurement.Inventory, 1, 3, "passed", "available") {
 		t.Fatalf("expected released inventory, got %+v", procurement.Inventory)
+	}
+}
+
+func TestRawMaterialInspectionWorkflowAppliesAfterApproval(t *testing.T) {
+	app := newTestHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", "admin123")
+	qualityToken := testLogin(t, app, "quality", "quality123")
+
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/system/workflows/definitions", `{"code":"raw_material_inspection_review","name":"原料质检复核","category":"approval","resource":"raw_material_inspection","trigger":{"eventType":"raw_material_inspection.review_requested","resource":"raw_material_inspection","conditions":[{"field":"result","operator":"equals","value":"passed"}]},"steps":[{"seq":1,"roleCode":"boss","action":"approve","name":"质量复核"}],"status":"active","version":1}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create raw material inspection workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, qualityToken, http.MethodPost, "/api/quality/raw-inspections", `{"receiptId":1,"moisture":3.2,"mudContent":1.4,"fineness":"II区","remark":"入厂抽检"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create raw material inspection status %d: %s", rec.Code, rec.Body.String())
+	}
+	var inspection RawMaterialInspection
+	if err := json.Unmarshal(rec.Body.Bytes(), &inspection); err != nil {
+		t.Fatalf("decode raw inspection: %v", err)
+	}
+
+	rec = testRequest(t, app, qualityToken, http.MethodPost, "/api/quality/raw-inspections/"+strconv.FormatInt(inspection.ID, 10)+"/review", `{"result":"passed","remark":"指标合格"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("request raw material inspection workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+	var instance WorkflowInstance
+	if err := json.Unmarshal(rec.Body.Bytes(), &instance); err != nil {
+		t.Fatalf("decode workflow instance: %v", err)
+	}
+	if instance.Resource != "raw_material_inspection" || instance.ResourceID != inspection.ID || instance.Status != "pending" {
+		t.Fatalf("unexpected workflow instance: %+v", instance)
+	}
+
+	overview := fetchQualityOverview(t, app, qualityToken)
+	if hasCompletedRawInspection(overview.RawInspections, inspection.ID, "passed") {
+		t.Fatalf("raw inspection should not complete before workflow approval, got %+v", overview.RawInspections)
+	}
+	rec = testRequest(t, app, qualityToken, http.MethodGet, "/api/procurement/overview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("procurement overview status %d: %s", rec.Code, rec.Body.String())
+	}
+	var procurement struct {
+		Receipts  []RawMaterialReceipt `json:"receipts"`
+		Inventory []InventoryItem      `json:"inventory"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &procurement); err != nil {
+		t.Fatalf("decode procurement overview: %v", err)
+	}
+	if !hasReceiptQualityStatus(procurement.Receipts, 1, "testing") || !hasInventoryQualityStatus(procurement.Inventory, 1, 3, "testing", "blocked") {
+		t.Fatalf("expected receipt and inventory to remain testing before approval, got receipts %+v inventory %+v", procurement.Receipts, procurement.Inventory)
+	}
+
+	snapshot := app.mustSnapshot()
+	taskID := int64(0)
+	for _, task := range snapshot.WorkflowTasks {
+		if task.InstanceID == instance.ID && task.Status == "pending" {
+			taskID = task.ID
+			break
+		}
+	}
+	if taskID == 0 {
+		t.Fatalf("expected pending workflow task for raw inspection, got %+v", snapshot.WorkflowTasks)
+	}
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/workflows/tasks/"+strconv.FormatInt(taskID, 10)+"/act", `{"action":"approve","comment":"质量复核通过"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("approve raw material inspection workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	overview = fetchQualityOverview(t, app, qualityToken)
+	if !hasCompletedRawInspection(overview.RawInspections, inspection.ID, "passed") {
+		t.Fatalf("expected passed raw inspection after workflow approval, got %+v", overview.RawInspections)
+	}
+	rec = testRequest(t, app, qualityToken, http.MethodGet, "/api/procurement/overview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("procurement overview status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &procurement); err != nil {
+		t.Fatalf("decode procurement overview after approval: %v", err)
+	}
+	if !hasReceiptQualityStatus(procurement.Receipts, 1, "passed") || !hasInventoryQualityStatus(procurement.Inventory, 1, 3, "passed", "available") {
+		t.Fatalf("expected released inventory after workflow approval, got receipts %+v inventory %+v", procurement.Receipts, procurement.Inventory)
 	}
 }
 

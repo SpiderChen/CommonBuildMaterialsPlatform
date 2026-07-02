@@ -35,7 +35,7 @@ func TestBusinessProjectionInsertsCoverCoreEnterpriseTables(t *testing.T) {
 		}},
 		Orders: []SalesOrder{{
 			ID: 1, OrderNo: "SO-1", CustomerID: 2, ProjectID: 3, ProductID: 4, SiteID: 5,
-			ProductLine: "concrete", PlanQuantity: 30, SignedQty: 10, UnitPrice: 480, Status: "dispatching", RiskFlag: "ok", PlanTime: "2026-06-18 10:00:00", CreatedAt: "2026-06-18 09:00:00",
+			ProductLine: "asphalt", PlanQuantity: 30, SignedQty: 10, UnitPrice: 480, Status: "dispatching", RiskFlag: "ok", PlanTime: "2026-06-18 10:00:00", CreatedAt: "2026-06-18 09:00:00",
 		}},
 		DispatchOrders: []DispatchOrder{{
 			ID: 11, DispatchNo: "DO-1", OrderID: 1, VehicleID: 7, DriverID: 8, SiteID: 5, ProjectID: 3,
@@ -57,25 +57,25 @@ func TestBusinessProjectionInsertsCoverCoreEnterpriseTables(t *testing.T) {
 			Quantity: 30, PlantCode: "PLANT-1", QualityStatus: "pending", Status: "completed", StartedAt: "2026-06-18 09:10:00", CompletedAt: "2026-06-18 09:25:00",
 		}},
 		MixDesigns: []MixDesign{{
-			ID: 22, ProductID: 4, SiteID: 5, Code: "MD-1", Version: "v1", StrengthGrade: "C30", Slump: "180mm",
+			ID: 22, ProductID: 4, SiteID: 5, Code: "MD-1", Version: "v1", StrengthGrade: "AC-13", Slump: "油石比 5.1%",
 			Scope: "测试配比", Status: "approved", IsCurrent: true, EffectiveFrom: "2026-01-01", EffectiveTo: "2026-12-31",
 			ApprovedBy: "admin", ApprovedAt: "2026-06-18 08:00:00", CreatedBy: "admin", CreatedAt: "2026-06-18 07:50:00", UpdatedAt: "2026-06-18 08:00:00",
 		}},
 		MixDesignTrialRuns: []MixDesignTrialRun{{
-			ID: 23, TrialNo: "MTR-1", MixDesignID: 22, ProductID: 4, SiteID: 5, TargetStrength: "C30", Slump: "180mm",
-			Water: 165, SandRate: 42, AdmixtureRate: 1.2, Strength7d: 32, Strength28d: 42, Result: "passed", Conclusion: "ok",
+			ID: 23, TrialNo: "MTR-1", MixDesignID: 22, ProductID: 4, SiteID: 5, TargetStrength: "AC-13", Slump: "油石比 5.1%",
+			Water: 0, SandRate: 42, AdmixtureRate: 1.2, Strength7d: 8.2, Strength28d: 9.1, Result: "passed", Conclusion: "ok",
 			Tester: "quality", TestedAt: "2026-06-18 08:30:00", CreatedAt: "2026-06-18 08:20:00",
 		}},
 		LaboratorySamples: []LaboratorySample{{
 			ID: 24, SampleNo: "LS-1", SourceType: "manual", SiteID: 5, ProductID: 4, MixDesignID: 22,
-			SampleType: "compressive_strength", Status: "completed", Result: "passed", PlannedTestAt: "2026-06-18", CollectedAt: "2026-06-18 08:00:00", CreatedBy: "quality",
+			SampleType: "marshall_stability", Status: "completed", Result: "passed", PlannedTestAt: "2026-06-18", CollectedAt: "2026-06-18 08:00:00", CreatedBy: "quality",
 		}},
 		LaboratoryTests: []LaboratoryTestRecord{{
-			ID: 25, TestNo: "LT-1", SampleID: 24, EquipmentID: 26, SiteID: 5, TestType: "compressive_strength",
-			Metric: "28d_strength", Value: 42, Unit: "MPa", Result: "passed", Status: "reviewed", Tester: "quality", TestedAt: "2026-06-18 08:30:00", Reviewer: "admin", ReviewedAt: "2026-06-18 09:00:00",
+			ID: 25, TestNo: "LT-1", SampleID: 24, EquipmentID: 26, SiteID: 5, TestType: "marshall_stability",
+			Metric: "stability", Value: 9.1, Unit: "kN", Result: "passed", Status: "reviewed", Tester: "quality", TestedAt: "2026-06-18 08:30:00", Reviewer: "admin", ReviewedAt: "2026-06-18 09:00:00",
 		}},
 		LaboratoryEquipment: []LaboratoryEquipment{{
-			ID: 26, EquipmentNo: "EQ-1", Name: "压力试验机", SiteID: 5, Model: "YES-2000", SerialNo: "SER-1",
+			ID: 26, EquipmentNo: "EQ-1", Name: "马歇尔稳定度仪", SiteID: 5, Model: "LWD-3", SerialNo: "SER-1",
 			Status: "active", CalibrationCycleDays: 180, LastCalibrationAt: "2026-06-01", NextCalibrationAt: "2026-11-28", CreatedAt: "2026-01-01 08:00:00",
 		}},
 		LaboratoryCalibrations: []LaboratoryCalibration{{

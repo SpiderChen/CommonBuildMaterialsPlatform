@@ -16,7 +16,7 @@ type inventoryLotConsumption struct {
 func inventoryStorageLocation(data AppData, siteID, materialID int64, quantity float64) (string, string) {
 	for _, item := range data.Inventory {
 		if item.SiteID == siteID && item.MaterialID == materialID && siloCanAccept(data, siteID, item.Silo, quantity) {
-			return fallback(item.Warehouse, "自动入库仓"), fallback(item.Silo, "AUTO")
+			return fallback(item.Warehouse, "自动账位"), fallback(item.Silo, "AUTO")
 		}
 	}
 	for _, warehouse := range data.Warehouses {
@@ -34,7 +34,7 @@ func inventoryStorageLocation(data AppData, siteID, materialID int64, quantity f
 			return warehouse.Name, "AUTO"
 		}
 	}
-	return "自动入库仓", "AUTO"
+	return "自动账位", "AUTO"
 }
 
 func siloCanAccept(data AppData, siteID int64, siloCode string, quantity float64) bool {

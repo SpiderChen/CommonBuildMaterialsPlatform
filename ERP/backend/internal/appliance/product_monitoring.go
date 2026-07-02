@@ -1,3 +1,5 @@
+//go:build legacy_product_ops
+
 package appliance
 
 import (

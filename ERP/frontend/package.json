@@ -4,13 +4,17 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "build": "tsc && vite build",
+    "dev": "./scripts/dev.sh",
+    "dev:desktop": "./scripts/dev.sh",
+    "dev:web": "./scripts/dev-web.sh",
+    "check:routes": "node ./scripts/check-route-coverage.mjs",
+    "build": "npm run check:routes && tsc && vite build",
+    "build:desktop": "./scripts/build.sh",
+    "build:web": "npm run check:routes && tsc && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "@heroui/react": "^3.0.0",
-    "@heroui/styles": "^3.0.0",
+    "dayjs": "^1.11.21",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",

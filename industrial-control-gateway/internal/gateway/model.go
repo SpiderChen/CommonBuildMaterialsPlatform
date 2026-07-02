@@ -3,6 +3,7 @@ package gateway
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -31,9 +32,10 @@ type Message struct {
 }
 
 type ProtocolFrameEnvelope struct {
-	Channel  string `json:"channel"`
-	Protocol string `json:"protocol"`
-	Raw      string `json:"raw"`
+	Channel  string          `json:"channel"`
+	Protocol string          `json:"protocol"`
+	Raw      string          `json:"raw"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
 }
 
 func newMessage(raw, source, channel, protocol string, now time.Time) Message {

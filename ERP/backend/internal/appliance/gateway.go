@@ -77,6 +77,11 @@ func (a *App) systemGateway(w http.ResponseWriter, r *http.Request, session Sess
 		a.recordGatewayReload(w, r, session)
 		return
 	}
+	if len(parts) == 2 && parts[0] == "routes" && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		a.deleteGatewayRoute(w, r, session, id)
+		return
+	}
 	if len(parts) == 3 && parts[0] == "routes" && r.Method == http.MethodPost {
 		id, _ := strconv.ParseInt(parts[1], 10, 64)
 		switch parts[2] {
@@ -207,22 +212,101 @@ func (a *App) updateGatewayStatus(w http.ResponseWriter, r *http.Request, sessio
 	}
 	_ = readJSON(r, &req)
 	var updated GatewayRoute
+	topic := "system.gateway.status"
 	err := a.store.Mutate(func(data *AppData) error {
 		idx := gatewayRouteIndex(data.GatewayRoutes, id)
 		if idx < 0 {
 			return fmt.Errorf("网关路由不存在")
 		}
-		status := fallback(req.Status, "active")
+		status := fallback(strings.TrimSpace(req.Status), "active")
 		if status != "active" && status != "disabled" {
 			return fmt.Errorf("网关路由状态无效")
 		}
-		data.GatewayRoutes[idx].Status = status
-		data.GatewayRoutes[idx].UpdatedAt = nowString()
-		updated = data.GatewayRoutes[idx]
-		addGatewayEvent(data, session.User.Username, updated, "status", status, clientIP(r))
+		if hasPendingWorkflowForResource(*data, "gateway_route", id) {
+			updated = data.GatewayRoutes[idx]
+			topic = "system.gateway.status_requested"
+			return nil
+		}
+		_, instances, err := publishGatewayRouteStatusWorkflow(data, data.GatewayRoutes[idx], status, session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			updated = data.GatewayRoutes[idx]
+			topic = "system.gateway.status_requested"
+			addAudit(data, session.User.Username, "request_status", "gateway_route", id, updated.PathPrefix+"/"+status, clientIP(r))
+			return nil
+		}
+		next, err := applyGatewayRouteStatusLocked(data, id, status, session.User.Username, clientIP(r))
+		if err != nil {
+			return err
+		}
+		updated = next
 		return nil
 	})
-	a.respondMutation(w, err, updated, "system.gateway.status")
+	a.respondMutation(w, err, updated, topic)
+}
+
+func (a *App) deleteGatewayRoute(w http.ResponseWriter, r *http.Request, session Session, id int64) {
+	var deleted GatewayRoute
+	err := a.store.Mutate(func(data *AppData) error {
+		idx := gatewayRouteIndex(data.GatewayRoutes, id)
+		if idx < 0 {
+			return fmt.Errorf("网关路由不存在")
+		}
+		route := data.GatewayRoutes[idx]
+		if fallback(strings.TrimSpace(route.Status), "active") == "active" {
+			return fmt.Errorf("启用中的网关路由不能删除")
+		}
+		if hasPendingWorkflowForResource(*data, "gateway_route", id) {
+			return fmt.Errorf("网关路由存在待审批流程，不能删除")
+		}
+		data.GatewayRoutes = append(data.GatewayRoutes[:idx], data.GatewayRoutes[idx+1:]...)
+		deleted = route
+		addGatewayEvent(data, session.User.Username, deleted, "delete", "删除网关路由", clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, deleted, "system.gateway.route.deleted")
+}
+
+func publishGatewayRouteStatusWorkflow(data *AppData, item GatewayRoute, targetStatus string, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "gateway_route.status_change_requested",
+		Source:     "system",
+		Resource:   "gateway_route",
+		ResourceID: item.ID,
+		ResourceNo: item.PathPrefix,
+		Title:      "网关路由状态变更 " + item.PathPrefix,
+		Actor:      actor,
+		Reason:     "网关路由状态变更审批",
+		Variables: map[string]string{
+			"targetStatus":   targetStatus,
+			"currentStatus":  item.Status,
+			"name":           item.Name,
+			"pathPrefix":     item.PathPrefix,
+			"stableUpstream": item.StableUpstream,
+			"canaryUpstream": item.CanaryUpstream,
+			"canaryPercent":  strconv.Itoa(item.CanaryPercent),
+			"drainEnabled":   strconv.FormatBool(item.DrainEnabled),
+			"readTimeoutSec": strconv.Itoa(item.ReadTimeoutSec),
+		},
+	})
+}
+
+func applyGatewayRouteStatusLocked(data *AppData, id int64, status string, actor string, ip string) (GatewayRoute, error) {
+	status = fallback(strings.TrimSpace(status), "active")
+	if status != "active" && status != "disabled" {
+		return GatewayRoute{}, fmt.Errorf("网关路由状态无效")
+	}
+	idx := gatewayRouteIndex(data.GatewayRoutes, id)
+	if idx < 0 {
+		return GatewayRoute{}, fmt.Errorf("网关路由不存在")
+	}
+	data.GatewayRoutes[idx].Status = status
+	data.GatewayRoutes[idx].UpdatedAt = nowString()
+	updated := data.GatewayRoutes[idx]
+	addGatewayEvent(data, actor, updated, "status", status, ip)
+	return updated, nil
 }
 
 func normalizeGatewayRoute(route GatewayRoute) (GatewayRoute, error) {

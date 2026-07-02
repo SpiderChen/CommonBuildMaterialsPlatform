@@ -1,6 +1,22 @@
 package appliance
 
+import "strings"
+
 func scopedData(data AppData, user User) AppData {
+	switch normalizeDataScope(roleDataScope(data.Roles, user.RoleCode)) {
+	case "customer":
+		return applyFieldPolicies(scopeCustomer(data, user.CustomerID), user)
+	case "driver":
+		return applyFieldPolicies(scopeDriver(data, user.DriverID), user)
+	case "site":
+		return applyFieldPolicies(scopeSite(data, user.SiteID), user)
+	case "company":
+		return applyFieldPolicies(scopeCompany(data, user.CompanyID), user)
+	case "device":
+		return applyFieldPolicies(data, user)
+	case "group":
+		return applyFieldPolicies(data, user)
+	}
 	switch user.RoleCode {
 	case "customer":
 		if user.CustomerID > 0 {
@@ -16,6 +32,26 @@ func scopedData(data AppData, user User) AppData {
 		}
 	}
 	return applyFieldPolicies(data, user)
+}
+
+func roleDataScope(roles []Role, roleCode string) string {
+	for _, role := range roles {
+		if role.Code == roleCode {
+			return role.DataScope
+		}
+	}
+	return ""
+}
+
+func normalizeDataScope(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "platform", "tenant", "group":
+		return "group"
+	case "company", "site", "customer", "driver", "device":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "group"
+	}
 }
 
 func scopeCustomer(data AppData, customerID int64) AppData {
@@ -39,6 +75,7 @@ func scopeCustomer(data AppData, customerID int64) AppData {
 	data.QualityInspections = nil
 	data.QualitySamples = nil
 	data.RawMaterialInspections = nil
+	data.MixDesignPlantProfiles = nil
 	data.MixDesignTrialRuns = nil
 	data.LaboratorySamples = nil
 	data.LaboratoryTests = nil
@@ -135,6 +172,7 @@ func scopeDriver(data AppData, driverID int64) AppData {
 	data.QualityInspections = nil
 	data.QualitySamples = nil
 	data.RawMaterialInspections = nil
+	data.MixDesignPlantProfiles = nil
 	data.MixDesignTrialRuns = nil
 	data.LaboratorySamples = nil
 	data.LaboratoryTests = nil
@@ -173,6 +211,11 @@ func scopeDriver(data AppData, driverID int64) AppData {
 func scopeSite(data AppData, siteID int64) AppData {
 	data.Sites = filter(data.Sites, func(item Site) bool { return item.ID == siteID })
 	data.Plants = filter(data.Plants, func(item Plant) bool { return item.SiteID == siteID })
+	data.PlantBufferLocations = filter(data.PlantBufferLocations, func(item PlantBufferLocation) bool { return item.SiteID == siteID })
+	data.PlantBufferFlows = filter(data.PlantBufferFlows, func(item PlantBufferFlow) bool { return item.SiteID == siteID })
+	data.StockYards = filter(data.StockYards, func(item StockYard) bool { return item.SiteID == siteID })
+	data.StockYardPiles = filter(data.StockYardPiles, func(item StockYardPile) bool { return item.SiteID == siteID })
+	data.StockYardFlows = filter(data.StockYardFlows, func(item StockYardFlow) bool { return item.SiteID == siteID })
 	data.Warehouses = filter(data.Warehouses, func(item Warehouse) bool { return item.SiteID == siteID })
 	data.Inventory = filter(data.Inventory, func(item InventoryItem) bool { return item.SiteID == siteID })
 	data.InventoryFlows = filter(data.InventoryFlows, func(item InventoryFlow) bool { return item.SiteID == siteID })
@@ -187,6 +230,7 @@ func scopeSite(data AppData, siteID int64) AppData {
 	data.ProductionBatches = filter(data.ProductionBatches, func(item ProductionBatch) bool { return item.SiteID == siteID })
 	data.ProductionReports = filter(data.ProductionReports, func(item ProductionDailyReport) bool { return item.SiteID == siteID })
 	data.MixDesigns = filter(data.MixDesigns, func(item MixDesign) bool { return item.SiteID == siteID || item.SiteID == 0 })
+	data.MixDesignPlantProfiles = filter(data.MixDesignPlantProfiles, func(item MixDesignPlantProfile) bool { return item.SiteID == siteID })
 	data.QualityInspections = filter(data.QualityInspections, func(item QualityInspection) bool { return item.SiteID == siteID })
 	visibleInspections := qualityInspectionIDs(data.QualityInspections)
 	data.QualitySamples = filter(data.QualitySamples, func(item QualitySample) bool { return visibleInspections[item.InspectionID] })
@@ -265,6 +309,219 @@ func scopeSite(data AppData, siteID int64) AppData {
 	return data
 }
 
+func scopeCompany(data AppData, companyID int64) AppData {
+	companyIDs := descendantCompanyIDs(data.Companies, companyID)
+	siteIDs := siteIDsForCompanies(data.Sites, companyIDs)
+	customerIDs := customerIDsForCompanies(data.Customers, companyIDs)
+	projectIDs := projectIDsForCustomers(data.Projects, customerIDs)
+
+	data.Companies = filter(data.Companies, func(item Company) bool { return companyIDs[item.ID] })
+	data.Departments = filter(data.Departments, func(item Department) bool { return companyIDs[item.CompanyID] })
+	data.Sites = filter(data.Sites, func(item Site) bool { return siteIDs[item.ID] })
+	data.Plants = filter(data.Plants, func(item Plant) bool { return siteIDs[item.SiteID] })
+	data.PlantBufferLocations = filter(data.PlantBufferLocations, func(item PlantBufferLocation) bool { return siteIDs[item.SiteID] })
+	data.PlantBufferFlows = filter(data.PlantBufferFlows, func(item PlantBufferFlow) bool { return siteIDs[item.SiteID] })
+	data.StockYards = filter(data.StockYards, func(item StockYard) bool { return siteIDs[item.SiteID] })
+	data.StockYardPiles = filter(data.StockYardPiles, func(item StockYardPile) bool { return siteIDs[item.SiteID] })
+	data.StockYardFlows = filter(data.StockYardFlows, func(item StockYardFlow) bool { return siteIDs[item.SiteID] })
+	data.Warehouses = filter(data.Warehouses, func(item Warehouse) bool { return siteIDs[item.SiteID] })
+	warehouseIDs := map[int64]bool{}
+	for _, warehouse := range data.Warehouses {
+		warehouseIDs[warehouse.ID] = true
+	}
+	data.Silos = filter(data.Silos, func(item Silo) bool { return warehouseIDs[item.WarehouseID] })
+	data.Customers = filter(data.Customers, func(item Customer) bool { return customerIDs[item.ID] })
+	data.CustomerContacts = filter(data.CustomerContacts, func(item CustomerContact) bool { return customerIDs[item.CustomerID] })
+	data.CustomerBlacklists = filter(data.CustomerBlacklists, func(item CustomerBlacklist) bool { return customerIDs[item.CustomerID] })
+	data.CustomerProfiles = filter(data.CustomerProfiles, func(item CustomerProfile) bool { return customerIDs[item.CustomerID] })
+	data.CustomerComplaints = filter(data.CustomerComplaints, func(item CustomerComplaint) bool { return customerIDs[item.CustomerID] })
+	data.Projects = filter(data.Projects, func(item Project) bool { return projectIDs[item.ID] || customerIDs[item.CustomerID] })
+	data.Contracts = filter(data.Contracts, func(item Contract) bool { return customerIDs[item.CustomerID] })
+	data.ContractAttachments = filter(data.ContractAttachments, func(item ContractAttachment) bool { return customerIDs[item.CustomerID] })
+	data.PricePolicies = filter(data.PricePolicies, func(item PricePolicy) bool {
+		return customerIDs[item.CustomerID] || projectIDs[item.ProjectID] || (item.CustomerID == 0 && item.ProjectID == 0)
+	})
+	data.Orders = filter(data.Orders, func(item SalesOrder) bool {
+		return siteIDs[item.SiteID] || customerIDs[item.CustomerID] || projectIDs[item.ProjectID]
+	})
+	visibleOrders := salesOrderIDs(data.Orders)
+	data.ProductionPlans = filter(data.ProductionPlans, func(item ProductionPlan) bool {
+		return siteIDs[item.SiteID] || visibleOrders[item.OrderID]
+	})
+	visiblePlans := productionPlanIDs(data.ProductionPlans)
+	data.ProductionTasks = filter(data.ProductionTasks, func(item ProductionTask) bool {
+		return siteIDs[item.SiteID] || visiblePlans[item.PlanID]
+	})
+	data.ProductionBatches = filter(data.ProductionBatches, func(item ProductionBatch) bool {
+		return siteIDs[item.SiteID] || visiblePlans[item.PlanID]
+	})
+	data.ProductionReports = filter(data.ProductionReports, func(item ProductionDailyReport) bool { return siteIDs[item.SiteID] })
+	data.PlantBufferLocations = filter(data.PlantBufferLocations, func(item PlantBufferLocation) bool { return siteIDs[item.SiteID] })
+	data.PlantBufferFlows = filter(data.PlantBufferFlows, func(item PlantBufferFlow) bool { return siteIDs[item.SiteID] })
+	data.StockYards = filter(data.StockYards, func(item StockYard) bool { return siteIDs[item.SiteID] })
+	data.StockYardPiles = filter(data.StockYardPiles, func(item StockYardPile) bool { return siteIDs[item.SiteID] })
+	data.StockYardFlows = filter(data.StockYardFlows, func(item StockYardFlow) bool { return siteIDs[item.SiteID] })
+	data.MixDesigns = filter(data.MixDesigns, func(item MixDesign) bool { return item.SiteID == 0 || siteIDs[item.SiteID] })
+	data.MixDesignPlantProfiles = filter(data.MixDesignPlantProfiles, func(item MixDesignPlantProfile) bool { return siteIDs[item.SiteID] })
+	data.QualityInspections = filter(data.QualityInspections, func(item QualityInspection) bool { return siteIDs[item.SiteID] })
+	visibleInspections := qualityInspectionIDs(data.QualityInspections)
+	data.QualitySamples = filter(data.QualitySamples, func(item QualitySample) bool { return visibleInspections[item.InspectionID] })
+	data.RawMaterialInspections = filter(data.RawMaterialInspections, func(item RawMaterialInspection) bool { return siteIDs[item.SiteID] })
+	data.MixDesignTrialRuns = filter(data.MixDesignTrialRuns, func(item MixDesignTrialRun) bool { return siteIDs[item.SiteID] })
+	data.LaboratorySamples = filter(data.LaboratorySamples, func(item LaboratorySample) bool { return siteIDs[item.SiteID] })
+	data.LaboratoryTests = filter(data.LaboratoryTests, func(item LaboratoryTestRecord) bool { return siteIDs[item.SiteID] })
+	data.LaboratoryEquipment = filter(data.LaboratoryEquipment, func(item LaboratoryEquipment) bool { return siteIDs[item.SiteID] })
+	data.LaboratoryCalibrations = filter(data.LaboratoryCalibrations, func(item LaboratoryCalibration) bool { return siteIDs[item.SiteID] })
+	data.QualityExceptions = filter(data.QualityExceptions, func(item QualityException) bool { return siteIDs[item.SiteID] })
+	data.Inventory = filter(data.Inventory, func(item InventoryItem) bool { return siteIDs[item.SiteID] })
+	data.InventoryFlows = filter(data.InventoryFlows, func(item InventoryFlow) bool { return siteIDs[item.SiteID] })
+	data.InventoryBatchTraces = filter(data.InventoryBatchTraces, func(item InventoryBatchTrace) bool { return siteIDs[item.SiteID] })
+	data.InventoryTransfers = filter(data.InventoryTransfers, func(item InventoryTransfer) bool {
+		return siteIDs[item.FromSiteID] || siteIDs[item.ToSiteID]
+	})
+	data.InventoryStocktakes = filter(data.InventoryStocktakes, func(item InventoryStocktake) bool { return siteIDs[item.SiteID] })
+	data.PurchaseRequests = filter(data.PurchaseRequests, func(item PurchaseRequest) bool { return siteIDs[item.SiteID] })
+	visibleRequests := purchaseRequestIDs(data.PurchaseRequests)
+	data.PurchaseOrders = filter(data.PurchaseOrders, func(item PurchaseOrder) bool { return visibleRequests[item.RequestID] })
+	data.RawMaterialReceipts = filter(data.RawMaterialReceipts, func(item RawMaterialReceipt) bool { return siteIDs[item.SiteID] })
+	data.DispatchOrders = filter(data.DispatchOrders, func(item DispatchOrder) bool {
+		return siteIDs[item.SiteID] || visibleOrders[item.OrderID]
+	})
+	visibleDispatches := dispatchOrderIDs(data.DispatchOrders)
+	data.DispatchSchedules = filter(data.DispatchSchedules, func(item DispatchSchedule) bool { return siteIDs[item.SiteID] })
+	data.TransportSettlementItems = filter(data.TransportSettlementItems, func(item TransportSettlementItem) bool { return visibleDispatches[item.DispatchID] })
+	visibleSettlements := transportSettlementIDs(data.TransportSettlementItems)
+	data.TransportSettlements = filter(data.TransportSettlements, func(item TransportSettlement) bool { return visibleSettlements[item.ID] })
+	data.Vehicles = filter(data.Vehicles, func(item Vehicle) bool { return siteIDs[item.SiteID] })
+	visibleVehicleIDs := map[int64]bool{}
+	visibleDriverIDs := map[int64]bool{}
+	for _, vehicle := range data.Vehicles {
+		visibleVehicleIDs[vehicle.ID] = true
+		visibleDriverIDs[vehicle.DriverID] = true
+	}
+	for _, dispatch := range data.DispatchOrders {
+		visibleVehicleIDs[dispatch.VehicleID] = true
+		visibleDriverIDs[dispatch.DriverID] = true
+	}
+	data.Drivers = filter(data.Drivers, func(item Driver) bool { return visibleDriverIDs[item.ID] })
+	data.VehicleDevices = filter(data.VehicleDevices, func(item VehicleDevice) bool { return visibleVehicleIDs[item.VehicleID] })
+	data.ScaleDevices = filter(data.ScaleDevices, func(item ScaleDevice) bool { return siteIDs[item.SiteID] })
+	data.ScaleDeviceEvents = filter(data.ScaleDeviceEvents, func(item ScaleDeviceEvent) bool {
+		device, ok := findScaleDeviceByCode(data, item.DeviceCode)
+		return ok && siteIDs[device.SiteID]
+	})
+	data.ScaleTickets = filter(data.ScaleTickets, func(item ScaleTicket) bool {
+		if siteIDs[item.SiteID] || visibleDispatches[item.DispatchID] {
+			return true
+		}
+		return item.TicketType == "raw_material_in" && siteIDs[rawTicketSiteID(data, item)]
+	})
+	data.LatestLocations = filter(data.LatestLocations, func(item VehicleLatestLocation) bool {
+		return siteIDs[item.CurrentSiteID] || customerIDs[item.CurrentCustomerID] || visibleVehicleIDs[item.VehicleID]
+	})
+	data.Locations = filter(data.Locations, func(item VehicleLocationEvent) bool { return visibleVehicleIDs[item.VehicleID] })
+	data.DeliverySigns = filter(data.DeliverySigns, func(item DeliverySign) bool {
+		return customerIDs[item.CustomerID] || projectIDs[item.ProjectID] || visibleDispatches[item.DispatchID]
+	})
+	data.DeliverySignLinks = filter(data.DeliverySignLinks, func(item DeliverySignLink) bool {
+		return visibleDispatches[item.DispatchID] || visibleOrders[item.OrderID]
+	})
+	visibleSigns := deliverySignIDs(data.DeliverySigns)
+	data.DeliverySignAttachments = filter(data.DeliverySignAttachments, func(item DeliverySignAttachment) bool {
+		return visibleSigns[item.SignID] || visibleDispatches[item.DispatchID]
+	})
+	data.Statements = filter(data.Statements, func(item Statement) bool { return customerIDs[item.CustomerID] })
+	data.SalesInvoices = filter(data.SalesInvoices, func(item SalesInvoice) bool { return customerIDs[item.CustomerID] })
+	visibleInvoices := invoiceIDs(data.SalesInvoices)
+	data.RedLetterInfos = filter(data.RedLetterInfos, func(item RedLetterInfo) bool {
+		return customerIDs[item.CustomerID] || visibleInvoices[item.OriginalInvoiceID] || visibleInvoices[item.RedInvoiceID]
+	})
+	data.TaxGatewaySubmissions = filter(data.TaxGatewaySubmissions, func(item TaxGatewaySubmission) bool { return visibleInvoices[item.InvoiceID] })
+	data.Receivables = filter(data.Receivables, func(item Receivable) bool { return customerIDs[item.CustomerID] })
+	data.Receipts = filter(data.Receipts, func(item Receipt) bool { return customerIDs[item.CustomerID] })
+	data.PaymentPlans = filter(data.PaymentPlans, func(item PaymentPlan) bool { return customerIDs[item.CustomerID] })
+	data.CollectionTasks = filter(data.CollectionTasks, func(item CollectionTask) bool { return customerIDs[item.CustomerID] })
+	data.CollectionDispatches = filter(data.CollectionDispatches, func(item CollectionDispatch) bool { return customerIDs[item.CustomerID] })
+	data.VehicleAlarms = filter(data.VehicleAlarms, func(item VehicleAlarm) bool {
+		return visibleVehicleIDs[item.VehicleID] || visibleDispatches[item.DispatchID]
+	})
+	data.Users = filter(data.Users, func(item User) bool { return companyIDs[item.CompanyID] })
+	data.OIDCProviders = filter(data.OIDCProviders, func(item OIDCProvider) bool { return item.CompanyID == 0 || companyIDs[item.CompanyID] })
+	data.SCIMProviders = filter(data.SCIMProviders, func(item SCIMProvider) bool { return item.CompanyID == 0 || companyIDs[item.CompanyID] })
+
+	ids := collectScopeIDs(data)
+	for id := range siteIDs {
+		ids.sites[id] = true
+	}
+	for id := range customerIDs {
+		ids.customers[id] = true
+	}
+	for id := range projectIDs {
+		ids.projects[id] = true
+	}
+	data = filterRelatedMasters(data, ids)
+	data.GeoFences = filter(data.GeoFences, func(item GeoFence) bool {
+		return siteIDs[item.SiteID] || projectIDs[item.ProjectID]
+	})
+	visibleGeoFences := geoFenceIDs(data.GeoFences)
+	data.GeoFenceEvents = filter(data.GeoFenceEvents, func(item GeoFenceEvent) bool {
+		return visibleGeoFences[item.FenceID] || visibleVehicleIDs[item.VehicleID]
+	})
+	data = filterTicketArtifacts(data)
+	data.ApprovalTasks = filterApprovalTasksForScopedData(data)
+	return data
+}
+
+func descendantCompanyIDs(companies []Company, companyID int64) map[int64]bool {
+	ids := map[int64]bool{}
+	if companyID == 0 {
+		return ids
+	}
+	ids[companyID] = true
+	changed := true
+	for changed {
+		changed = false
+		for _, company := range companies {
+			if ids[company.ID] || !ids[company.ParentID] {
+				continue
+			}
+			ids[company.ID] = true
+			changed = true
+		}
+	}
+	return ids
+}
+
+func siteIDsForCompanies(sites []Site, companyIDs map[int64]bool) map[int64]bool {
+	ids := map[int64]bool{}
+	for _, site := range sites {
+		if companyIDs[site.CompanyID] {
+			ids[site.ID] = true
+		}
+	}
+	return ids
+}
+
+func customerIDsForCompanies(customers []Customer, companyIDs map[int64]bool) map[int64]bool {
+	ids := map[int64]bool{}
+	for _, customer := range customers {
+		if companyIDs[customer.CompanyID] {
+			ids[customer.ID] = true
+		}
+	}
+	return ids
+}
+
+func projectIDsForCustomers(projects []Project, customerIDs map[int64]bool) map[int64]bool {
+	ids := map[int64]bool{}
+	for _, project := range projects {
+		if customerIDs[project.CustomerID] {
+			ids[project.ID] = true
+		}
+	}
+	return ids
+}
+
 type scopeIDSet struct {
 	customers map[int64]bool
 	projects  map[int64]bool
@@ -305,6 +562,10 @@ func collectScopeIDs(data AppData) scopeIDSet {
 		ids.products[item.ProductID] = true
 		ids.sites[item.SiteID] = true
 	}
+	for _, item := range data.MixDesignPlantProfiles {
+		ids.products[item.ProductID] = true
+		ids.sites[item.SiteID] = true
+	}
 	for _, item := range data.MixDesignTrialRuns {
 		ids.products[item.ProductID] = true
 		ids.sites[item.SiteID] = true
@@ -339,6 +600,11 @@ func collectScopeIDs(data AppData) scopeIDSet {
 func filterRelatedMasters(data AppData, ids scopeIDSet) AppData {
 	data.Sites = filter(data.Sites, func(item Site) bool { return ids.sites[item.ID] })
 	data.Plants = filter(data.Plants, func(item Plant) bool { return ids.sites[item.SiteID] })
+	data.PlantBufferLocations = filter(data.PlantBufferLocations, func(item PlantBufferLocation) bool { return ids.sites[item.SiteID] })
+	data.PlantBufferFlows = filter(data.PlantBufferFlows, func(item PlantBufferFlow) bool { return ids.sites[item.SiteID] })
+	data.StockYards = filter(data.StockYards, func(item StockYard) bool { return ids.sites[item.SiteID] })
+	data.StockYardPiles = filter(data.StockYardPiles, func(item StockYardPile) bool { return ids.sites[item.SiteID] })
+	data.StockYardFlows = filter(data.StockYardFlows, func(item StockYardFlow) bool { return ids.sites[item.SiteID] })
 	data.Warehouses = filter(data.Warehouses, func(item Warehouse) bool { return ids.sites[item.SiteID] })
 	warehouseIDs := map[int64]bool{}
 	for _, warehouse := range data.Warehouses {
@@ -369,6 +635,9 @@ func filterRelatedMasters(data AppData, ids scopeIDSet) AppData {
 		return ids.products[item.ID] || len(ids.products) == 0
 	})
 	data.MixDesigns = filter(data.MixDesigns, func(item MixDesign) bool {
+		return ids.products[item.ProductID] || len(ids.products) == 0
+	})
+	data.MixDesignPlantProfiles = filter(data.MixDesignPlantProfiles, func(item MixDesignPlantProfile) bool {
 		return ids.products[item.ProductID] || len(ids.products) == 0
 	})
 	data.MixDesignTrialRuns = filter(data.MixDesignTrialRuns, func(item MixDesignTrialRun) bool {
@@ -470,7 +739,7 @@ func qualityInspectionIDs(items []QualityInspection) map[int64]bool {
 func filterTicketArtifacts(data AppData) AppData {
 	visible := visibleTicketIDs(data)
 	data.ScaleWeightRecords = filter(data.ScaleWeightRecords, func(item ScaleWeightRecord) bool { return visible[item.TicketID] })
-	data.DeliveryNotes = filter(data.DeliveryNotes, func(item DeliveryNote) bool { return visible[item.TicketID] })
+	data.DeliveryNotes = filter(data.DeliveryNotes, func(item DeliveryNote) bool { return item.TicketID == 0 || visible[item.TicketID] })
 	data.DeliverySignLinks = filter(data.DeliverySignLinks, func(item DeliverySignLink) bool { return item.TicketID == 0 || visible[item.TicketID] })
 	data.DeliverySignAttachments = filter(data.DeliverySignAttachments, func(item DeliverySignAttachment) bool { return item.TicketID == 0 || visible[item.TicketID] })
 	data.TicketPrintLogs = filter(data.TicketPrintLogs, func(item TicketPrintLog) bool { return visible[item.TicketID] })

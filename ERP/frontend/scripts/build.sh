@@ -14,4 +14,15 @@ cd "$PROJECT_DIR"
 if [[ ! -d node_modules ]]; then
   npm install
 fi
-"$WAILS_BIN" build
+
+wails_tag_args=()
+if [[ "$(uname -s)" == "Linux" ]]; then
+  if ! pkg-config --exists webkit2gtk-4.0 2>/dev/null && pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+    wails_tag_args=(-tags webkit2_41)
+  fi
+fi
+if [[ -n "${WAILS_TAGS:-}" ]]; then
+  wails_tag_args=(-tags "$WAILS_TAGS")
+fi
+
+"$WAILS_BIN" build "${wails_tag_args[@]}"

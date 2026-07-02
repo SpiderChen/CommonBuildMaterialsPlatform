@@ -15,10 +15,10 @@ func TestPlantProtocolFrameIngestCreatesProductionBatchWithActualConsumption(t *
 	app := newTestHTTPApp(t)
 	task := createPlantTaskForTest(t, app, 12)
 	payload := `{"channel":"opc","protocol":"plant-json","payload":{
-		"deviceNo":"PLANT-NS-HZS180",
+		"deviceNo":"PLANT-NS-AMP240",
 		"taskId":` + strconv.FormatInt(task.ID, 10) + `,
 		"batchNo":"PLC-BATCH-001",
-		"plantCode":"NS-HZS180",
+		"plantCode":"NS-AMP240",
 		"quantity":6,
 		"operator":"PLC-A",
 		"qualityStatus":"pending",
@@ -51,6 +51,18 @@ func TestPlantProtocolFrameIngestCreatesProductionBatchWithActualConsumption(t *
 	if !hasProtocolFrame(data.DeviceProtocolFrames, "production_batch", response.ProductionBatch.ID, "accepted") {
 		t.Fatalf("expected accepted production protocol frame, got %+v", data.DeviceProtocolFrames)
 	}
+	token := testLogin(t, app, "admin", "admin123")
+	rec = testRequest(t, app, token, http.MethodGet, "/api/master/plants", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list plants status %d: %s", rec.Code, rec.Body.String())
+	}
+	var plants []Plant
+	if err := json.Unmarshal(rec.Body.Bytes(), &plants); err != nil {
+		t.Fatalf("decode plants: %v", err)
+	}
+	if !hasPlantGatewayStatus(plants, "NS-AMP240", "online", "PLANT-NS-AMP240") {
+		t.Fatalf("expected plant gateway status from protocol frame, got %+v", plants)
+	}
 }
 
 func TestDeviceGatewaySerialFileIngestsPlantBatchFrame(t *testing.T) {
@@ -58,7 +70,7 @@ func TestDeviceGatewaySerialFileIngestsPlantBatchFrame(t *testing.T) {
 	task := createPlantTaskForTest(t, app, 8)
 	dir := t.TempDir()
 	serialFile := filepath.Join(dir, "plant-serial.log")
-	line := "KEY=plant-demo-key-1|PLANT," + strconv.FormatInt(task.ID, 10) + ",NS-HZS180,4,2026-06-20 10:20:00,PLC-B,2026-06-20 10:00:00,released,pending,1:1.52:t|4:4.08:t\n"
+	line := "KEY=plant-demo-key-1|PLANT," + strconv.FormatInt(task.ID, 10) + ",NS-AMP240,4,2026-06-20 10:20:00,PLC-B,2026-06-20 10:00:00,released,pending,1:1.52:t|4:4.08:t\n"
 	if err := os.WriteFile(serialFile, []byte(line), 0600); err != nil {
 		t.Fatalf("write plant serial file: %v", err)
 	}
@@ -91,7 +103,7 @@ func TestDeviceGatewaySerialFileIngestsPlantBatchFrame(t *testing.T) {
 			break
 		}
 	}
-	if batch.ID == 0 || batch.PlantCode != "NS-HZS180" || batch.Status != "released" {
+	if batch.ID == 0 || batch.PlantCode != "NS-AMP240" || batch.Status != "released" {
 		t.Fatalf("expected plant gateway production batch, got %+v", data.ProductionBatches)
 	}
 	if !hasActualConsumptionFlow(data.InventoryFlows, batch.ID, 2) {
@@ -138,6 +150,15 @@ func hasActualConsumptionFlow(items []InventoryFlow, batchID int64, want int) bo
 func hasProtocolFrame(items []DeviceProtocolFrame, resource string, parsedID int64, status string) bool {
 	for _, item := range items {
 		if item.ParsedResource == resource && item.ParsedID == parsedID && item.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPlantGatewayStatus(items []Plant, code string, status string, deviceNo string) bool {
+	for _, item := range items {
+		if item.Code == code && item.GatewayStatus == status && item.GatewayDeviceNo == deviceNo {
 			return true
 		}
 	}

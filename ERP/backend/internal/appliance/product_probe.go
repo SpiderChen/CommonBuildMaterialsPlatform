@@ -1,8 +1,8 @@
+//go:build legacy_product_ops
+
 package appliance
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -108,12 +108,6 @@ func (a *App) productOpsProbeReport(w http.ResponseWriter, r *http.Request) {
 		a.emit("product_ops.alert.created", response.Alert)
 	}
 	writeJSON(w, http.StatusCreated, response)
-}
-
-func productProbeToken(instance ProductInstance) string {
-	seed := strings.Join([]string{"probe", instance.Watermark, instance.LicenseID, instance.CustomerName}, "|")
-	sum := sha256.Sum256([]byte(seed))
-	return "probe-" + hex.EncodeToString(sum[:])[:24]
 }
 
 func normalizeProbeStatus(status string) string {

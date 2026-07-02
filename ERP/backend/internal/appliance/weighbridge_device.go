@@ -51,7 +51,7 @@ func (a *App) recordScaleDeviceEvent(r *http.Request, session Session, req Scale
 			var found bool
 			ticket, found = findScaleTicket(*data, req.TicketID)
 			if !found {
-				return fmt.Errorf("关联票据不存在")
+				return fmt.Errorf("关联过磅记录不存在")
 			}
 		}
 		item = buildScaleDeviceEvent(data, device, ticket, req)

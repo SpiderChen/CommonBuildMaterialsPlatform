@@ -6,33 +6,38 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+const customerDeliveryAdminPassword = "customer-delivery-admin-test"
+
+func newCustomerDeliveryHTTPApp(t *testing.T) *App {
+	t.Helper()
+	clearSeedPasswordEnv(t)
+	t.Setenv("CBMP_SEED_DEMO", "1")
+	t.Setenv("CBMP_INITIAL_ADMIN_PASSWORD", customerDeliveryAdminPassword)
+	store := NewStore(filepath.Join(t.TempDir(), "app.vault"), "test-key")
+	if err := store.Load(); err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	return NewApp(store, "")
+}
 
 func TestInvoiceTaxSubmissionAndCustomerDownload(t *testing.T) {
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
 
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices", `{"statementId":1}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create invoice status %d: %s", rec.Code, rec.Body.String())
-	}
-	var invoice SalesInvoice
-	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
-		t.Fatalf("decode invoice: %v", err)
-	}
-	if invoice.TaxStatus != "pending" || invoice.FileURL != "" {
-		t.Fatalf("expected pending tax invoice, got %+v", invoice)
-	}
-
 	customerToken := testLogin(t, app, "customer", "customer123")
-	invoiceID := strconv.FormatInt(invoice.ID, 10)
-	rec = testRequest(t, app, customerToken, http.MethodGet, "/api/finance/invoices/"+invoiceID+"/download", "")
+	invoiceID := "1"
+	rec := testRequest(t, app, customerToken, http.MethodGet, "/api/finance/invoices/"+invoiceID+"/download", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected pending invoice download rejection, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -41,6 +46,7 @@ func TestInvoiceTaxSubmissionAndCustomerDownload(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("submit tax status %d: %s", rec.Code, rec.Body.String())
 	}
+	var invoice SalesInvoice
 	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
 		t.Fatalf("decode submitted invoice: %v", err)
 	}
@@ -63,6 +69,65 @@ func TestInvoiceTaxSubmissionAndCustomerDownload(t *testing.T) {
 	}
 	if download.Invoice.DownloadedAt == "" || download.DownloadedAt == "" || download.URL == "" || download.FileName == "" {
 		t.Fatalf("expected invoice download metadata, got %+v", download)
+	}
+}
+
+func TestCreateInvoiceRejectsAlreadyInvoicedStatement(t *testing.T) {
+	app := newTestHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", "admin123")
+
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices", `{"statementId":1}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "已开票") {
+		t.Fatalf("expected duplicate invoice rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTaxGatewayRequiresRealEndpointWhenMockDisabled(t *testing.T) {
+	t.Setenv("CBMP_TAX_GATEWAY_URL", "")
+	t.Setenv("CBMP_TAX_GATEWAY_PROVIDER", "")
+
+	app := newCustomerDeliveryHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", customerDeliveryAdminPassword)
+	status := app.runtimeStatus()
+	if status.TaxGateway != "unconfigured" || status.TaxGatewayProvider != "" || status.TaxGatewayURL != "" {
+		t.Fatalf("customer delivery runtime must expose tax gateway as unconfigured, got %+v", status)
+	}
+
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/submit-tax", `{}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected unconfigured tax gateway rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	data, err := app.store.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot store: %v", err)
+	}
+	var invoice SalesInvoice
+	for _, item := range data.SalesInvoices {
+		if item.ID == 1 {
+			invoice = item
+			break
+		}
+	}
+	if invoice.TaxStatus != "failed" || invoice.TaxControlNo != "" || invoice.FileURL != "" {
+		t.Fatalf("unconfigured tax gateway must leave invoice failed without simulated tax output, got %+v", invoice)
+	}
+	var submission TaxGatewaySubmission
+	for _, item := range data.TaxGatewaySubmissions {
+		if item.InvoiceID == invoice.ID {
+			submission = item
+			break
+		}
+	}
+	if submission.ID == 0 || submission.Status != "failed" || submission.Provider != "" || submission.Endpoint != "" || submission.Error == "" {
+		t.Fatalf("unconfigured tax gateway trail must not expose simulator metadata, got %+v", submission)
+	}
+	for _, endpoint := range data.IntegrationEndpoints {
+		if endpoint.Type == "finance" && strings.Contains(endpoint.Name, "税控") {
+			if endpoint.URL != "" || endpoint.Status != "degraded" {
+				t.Fatalf("unconfigured tax endpoint must stay blank and degraded, got %+v", endpoint)
+			}
+		}
 	}
 }
 
@@ -106,16 +171,9 @@ func TestExternalTaxGatewaySubmissionRecordsAuditTrail(t *testing.T) {
 
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices", `{"statementId":1}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create invoice status %d: %s", rec.Code, rec.Body.String())
-	}
 	var invoice SalesInvoice
-	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
-		t.Fatalf("decode invoice: %v", err)
-	}
 
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+strconv.FormatInt(invoice.ID, 10)+"/submit-tax", `{}`)
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/submit-tax", `{}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("submit tax status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -162,16 +220,9 @@ func TestExternalTaxGatewayFailureMarksInvoiceFailed(t *testing.T) {
 
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices", `{"statementId":1}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create invoice status %d: %s", rec.Code, rec.Body.String())
-	}
-	var invoice SalesInvoice
-	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
-		t.Fatalf("decode invoice: %v", err)
-	}
+	invoice := SalesInvoice{ID: 1}
 
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+strconv.FormatInt(invoice.ID, 10)+"/submit-tax", `{}`)
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/submit-tax", `{}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected bad gateway, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -228,16 +279,9 @@ func TestTaxGatewayAsyncCallbackCompletesAcceptedInvoice(t *testing.T) {
 
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices", `{"statementId":1}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create invoice status %d: %s", rec.Code, rec.Body.String())
-	}
 	var invoice SalesInvoice
-	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
-		t.Fatalf("decode invoice: %v", err)
-	}
 
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+strconv.FormatInt(invoice.ID, 10)+"/submit-tax", `{}`)
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/submit-tax", `{}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("submit tax status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -284,11 +328,29 @@ func TestTaxGatewayCallbackRejectsBadSignature(t *testing.T) {
 	}
 }
 
+func createSubmittedTaxInvoice(t *testing.T, app *App, adminToken string) SalesInvoice {
+	t.Helper()
+	var invoice SalesInvoice
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/submit-tax", `{}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("submit invoice tax status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &invoice); err != nil {
+		t.Fatalf("decode submitted invoice: %v", err)
+	}
+	if invoice.TaxStatus != "submitted" || invoice.TaxControlNo == "" || invoice.FileURL == "" {
+		t.Fatalf("expected submitted tax invoice, got %+v", invoice)
+	}
+	return invoice
+}
+
 func TestRedOffsetInvoiceCreatesNegativeRedInvoice(t *testing.T) {
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
+	originalInvoice := createSubmittedTaxInvoice(t, app, adminToken)
+	originalID := strconv.FormatInt(originalInvoice.ID, 10)
 
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/red-offset", `{"reason":"客户退货红冲"}`)
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+originalID+"/red-offset", `{"reason":"客户退货红冲"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("red offset status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -296,7 +358,7 @@ func TestRedOffsetInvoiceCreatesNegativeRedInvoice(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &red); err != nil {
 		t.Fatalf("decode red invoice: %v", err)
 	}
-	if red.InvoiceType != "red" || red.OriginalInvoiceID != 1 || red.Amount >= 0 || red.TaxAmount >= 0 || red.TaxStatus != "submitted" || red.TaxControlNo == "" {
+	if red.InvoiceType != "red" || red.OriginalInvoiceID != originalInvoice.ID || red.Amount >= 0 || red.TaxAmount >= 0 || red.TaxStatus != "submitted" || red.TaxControlNo == "" {
 		t.Fatalf("expected submitted red invoice, got %+v", red)
 	}
 
@@ -315,7 +377,7 @@ func TestRedOffsetInvoiceCreatesNegativeRedInvoice(t *testing.T) {
 	}
 	var original SalesInvoice
 	for _, item := range overview.Invoices {
-		if item.ID == 1 {
+		if item.ID == originalInvoice.ID {
 			original = item
 		}
 	}
@@ -354,8 +416,10 @@ func TestRedOffsetInvoiceCreatesNegativeRedInvoice(t *testing.T) {
 func TestRedLetterInfoApprovalAndUsage(t *testing.T) {
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
+	originalInvoice := createSubmittedTaxInvoice(t, app, adminToken)
+	originalID := strconv.FormatInt(originalInvoice.ID, 10)
 
-	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/red-letters", `{"originalInvoiceId":1,"reason":"项目退货红字申请"}`)
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/finance/red-letters", `{"originalInvoiceId":`+originalID+`,"reason":"项目退货红字申请"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create red letter info status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -363,11 +427,11 @@ func TestRedLetterInfoApprovalAndUsage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		t.Fatalf("decode red letter info: %v", err)
 	}
-	if info.Status != "requested" || info.OriginalInvoiceID != 1 || info.Amount >= 0 || info.TaxAmount >= 0 {
+	if info.Status != "requested" || info.OriginalInvoiceID != originalInvoice.ID || info.Amount >= 0 || info.TaxAmount >= 0 {
 		t.Fatalf("expected requested negative red letter info, got %+v", info)
 	}
 
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/red-offset", `{"reason":"项目退货红字申请","redLetterInfoId":`+strconv.FormatInt(info.ID, 10)+`}`)
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+originalID+"/red-offset", `{"reason":"项目退货红字申请","redLetterInfoId":`+strconv.FormatInt(info.ID, 10)+`}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected unapproved red letter rejection, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -383,7 +447,7 @@ func TestRedLetterInfoApprovalAndUsage(t *testing.T) {
 		t.Fatalf("expected approved red letter info, got %+v", info)
 	}
 
-	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/1/red-offset", `{"reason":"项目退货红字申请","redLetterInfoId":`+strconv.FormatInt(info.ID, 10)+`}`)
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+originalID+"/red-offset", `{"reason":"项目退货红字申请","redLetterInfoId":`+strconv.FormatInt(info.ID, 10)+`}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("red offset with red letter info status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -413,6 +477,59 @@ func TestRedLetterInfoApprovalAndUsage(t *testing.T) {
 	}
 	if used.Status != "used" || used.RedInvoiceID != red.ID || used.UsedAt == "" {
 		t.Fatalf("expected used red letter info after red invoice submission, got %+v", used)
+	}
+}
+
+func TestRedLetterInfoWorkflowApprovalAndUsage(t *testing.T) {
+	app := newTestHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", "admin123")
+	originalInvoice := createSubmittedTaxInvoice(t, app, adminToken)
+	originalID := strconv.FormatInt(originalInvoice.ID, 10)
+
+	rec := testRequest(t, app, adminToken, http.MethodPost, "/api/system/workflows/definitions", `{"code":"red_letter_info_finance","name":"红字信息表审批","category":"approval","resource":"red_letter_info","trigger":{"eventType":"red_letter_info.requested","resource":"red_letter_info","conditions":[{"field":"amount","operator":"less_than","value":"0"}]},"steps":[{"seq":1,"roleCode":"boss","action":"approve","name":"财务确认"}],"status":"active","version":1}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create red letter workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/red-letters", `{"originalInvoiceId":`+originalID+`,"reason":"项目退货红字申请"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create red letter info status %d: %s", rec.Code, rec.Body.String())
+	}
+	var info RedLetterInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode red letter info: %v", err)
+	}
+	if info.Status != "pending_approval" || info.OriginalInvoiceID != originalInvoice.ID {
+		t.Fatalf("expected pending workflow red letter info, got %+v", info)
+	}
+	snapshot := app.mustSnapshot()
+	if len(snapshot.WorkflowEvents) != 1 || snapshot.WorkflowEvents[0].EventType != "red_letter_info.requested" || snapshot.WorkflowEvents[0].ResourceID != info.ID || snapshot.WorkflowEvents[0].Status != "handled" {
+		t.Fatalf("expected handled red letter workflow event, got %+v", snapshot.WorkflowEvents)
+	}
+	if len(snapshot.WorkflowTasks) != 1 || snapshot.WorkflowTasks[0].Resource != "red_letter_info" || snapshot.WorkflowTasks[0].ResourceID != info.ID || snapshot.WorkflowTasks[0].Status != "pending" {
+		t.Fatalf("expected pending red letter workflow task, got %+v", snapshot.WorkflowTasks)
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/red-letters/"+strconv.FormatInt(info.ID, 10)+"/approve", `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("direct approve should not bypass pending workflow, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/system/workflows/tasks/"+strconv.FormatInt(snapshot.WorkflowTasks[0].ID, 10)+"/act", `{"action":"approve","comment":"财务确认"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("act red letter workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/invoices/"+originalID+"/red-offset", `{"reason":"项目退货红字申请","redLetterInfoId":`+strconv.FormatInt(info.ID, 10)+`}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("red offset with workflow-approved red letter info status %d: %s", rec.Code, rec.Body.String())
+	}
+	var red SalesInvoice
+	if err := json.Unmarshal(rec.Body.Bytes(), &red); err != nil {
+		t.Fatalf("decode red invoice: %v", err)
+	}
+	if red.RedLetterInfoID != info.ID || red.RedLetterInfoNo != info.InfoNo {
+		t.Fatalf("expected red invoice linked to workflow red letter info, got red=%+v info=%+v", red, info)
 	}
 }
 
@@ -521,6 +638,36 @@ func TestCollectionTasksGenerateSendAndHandle(t *testing.T) {
 	if template.ID == 0 || !template.Enabled {
 		t.Fatalf("expected enabled collection template, got %+v", template)
 	}
+	collectionRequestReceived := false
+	collectionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected collection provider POST, got %s", r.Method)
+		}
+		if r.Header.Get("X-CBMP-Request-Id") == "" || r.Header.Get("X-CBMP-Collection-Dispatch") == "" {
+			t.Fatalf("expected collection provider headers, got %+v", r.Header)
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode collection provider payload: %v", err)
+		}
+		if payload["content"] == "" || payload["target"] == "" || payload["channel"] != "sms" {
+			t.Fatalf("unexpected collection provider payload: %+v", payload)
+		}
+		collectionRequestReceived = true
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "providerMessageId": "MSG-SEND-001"})
+	}))
+	t.Cleanup(collectionServer.Close)
+	if err := app.store.Mutate(func(data *AppData) error {
+		endpoint, endpointIndex := ensureCollectionEndpoint(data, "sms")
+		if endpointIndex < 0 {
+			return fmt.Errorf("sms collection endpoint missing: %+v", endpoint)
+		}
+		data.IntegrationEndpoints[endpointIndex].URL = collectionServer.URL
+		data.IntegrationEndpoints[endpointIndex].Status = "online"
+		return nil
+	}); err != nil {
+		t.Fatalf("configure collection endpoint: %v", err)
+	}
 
 	rec = testRequest(t, app, adminToken, http.MethodPost, "/api/finance/collections/"+strconv.FormatInt(tasks[0].ID, 10)+"/send", `{"templateId":`+strconv.FormatInt(template.ID, 10)+`}`)
 	if rec.Code != http.StatusCreated {
@@ -530,11 +677,14 @@ func TestCollectionTasksGenerateSendAndHandle(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &dispatch); err != nil {
 		t.Fatalf("decode collection dispatch: %v", err)
 	}
-	if dispatch.Status != "delivered" || dispatch.TemplateID != template.ID || dispatch.Target == "" || dispatch.Endpoint == "" {
-		t.Fatalf("expected delivered collection dispatch, got %+v", dispatch)
+	if dispatch.Status != "sent" || dispatch.TemplateID != template.ID || dispatch.Target == "" || dispatch.Endpoint != collectionServer.URL {
+		t.Fatalf("expected sent collection dispatch through real endpoint, got %+v", dispatch)
 	}
-	if dispatch.ProviderRequestID == "" {
-		t.Fatalf("expected provider request id, got %+v", dispatch)
+	if !collectionRequestReceived {
+		t.Fatalf("expected collection provider to receive dispatch, got %+v", dispatch)
+	}
+	if dispatch.ProviderRequestID == "" || dispatch.ProviderMessageID != "MSG-SEND-001" {
+		t.Fatalf("expected provider request and message ids, got %+v", dispatch)
 	}
 
 	t.Setenv("CBMP_COLLECTION_CALLBACK_SECRET", "collection-secret")

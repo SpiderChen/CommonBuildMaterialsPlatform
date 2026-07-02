@@ -14,7 +14,8 @@ func SeedData() AppData {
 		Customers: []CustomerDeployment{
 			{
 				ID: 1, CustomerName: "湾区建材集团", ProductName: "CommonBuildMaterialsPlatform", LicenseID: "CBMP-WQ-2026-001",
-				Edition: "Enterprise Appliance", DeploymentMode: "private_server", Environment: "production", ServerEndpoint: "https://erp.wanqu.example.com",
+				UpdaterToken: "ops-updater-demo-1",
+				Edition:      "Enterprise Appliance", DeploymentMode: "private_server", Environment: "production", ServerEndpoint: "https://erp.wanqu.example.com",
 				ContactName: "陈经理", ContactPhone: "13800010001", ExpiresAt: "2026-09-30", RenewalStatus: "expiring",
 				Modules: []string{"erp", "production", "dispatch", "weighbridge", "finance", "update"}, MaxSites: 20, MaxVehicles: 5000,
 				CurrentClientVersion: "1.4.1", CurrentServerVersion: "1.4.2", TargetClientVersion: "1.4.3", TargetServerVersion: "1.4.3",
@@ -22,15 +23,17 @@ func SeedData() AppData {
 			},
 			{
 				ID: 2, CustomerName: "华东骨料供应链", ProductName: "CommonBuildMaterialsPlatform", LicenseID: "CBMP-HD-2026-006",
-				Edition: "Standard Appliance", DeploymentMode: "private_server", Environment: "production", ServerEndpoint: "https://materials.east.example.com",
+				UpdaterToken: "ops-updater-demo-2",
+				Edition:      "Standard Appliance", DeploymentMode: "private_server", Environment: "production", ServerEndpoint: "https://materials.east.example.com",
 				ContactName: "李总", ContactPhone: "13900020002", ExpiresAt: "2027-03-31", RenewalStatus: "active",
 				Modules: []string{"erp", "inventory", "dispatch", "weighbridge"}, MaxSites: 5, MaxVehicles: 600,
 				CurrentClientVersion: "1.4.3", CurrentServerVersion: "1.4.3", TargetClientVersion: "1.4.3", TargetServerVersion: "1.4.3",
 				HealthStatus: "healthy", LastHeartbeatAt: "2026-06-19 09:20:10", Notes: "标准私有化部署，自动更新通道已打开。",
 			},
 			{
-				ID: 3, CustomerName: "西南商砼联合", ProductName: "CommonBuildMaterialsPlatform", LicenseID: "CBMP-XN-2025-018",
-				Edition: "Enterprise Appliance", DeploymentMode: "private_server", Environment: "production", ServerEndpoint: "https://cbmp.southwest.example.com",
+				ID: 3, CustomerName: "西南沥青联合", ProductName: "CommonBuildMaterialsPlatform", LicenseID: "CBMP-XN-2025-018",
+				UpdaterToken: "ops-updater-demo-3",
+				Edition:      "Enterprise Appliance", DeploymentMode: "private_server", Environment: "production", ServerEndpoint: "https://cbmp.southwest.example.com",
 				ContactName: "周工", ContactPhone: "13700030003", ExpiresAt: "2026-06-10", RenewalStatus: "expired",
 				Modules: []string{"erp", "production", "quality", "dispatch"}, MaxSites: 12, MaxVehicles: 1800,
 				CurrentClientVersion: "1.3.9", CurrentServerVersion: "1.4.0", TargetClientVersion: "1.4.3", TargetServerVersion: "1.4.3",
@@ -63,13 +66,13 @@ func SeedData() AppData {
 			{
 				ID: 1, PackageNo: "UP202606190001", Target: "client", ProductName: "CommonBuildMaterialsPlatform",
 				Version: "1.4.3", Channel: "stable", Status: "published", FileName: "cbmp-desktop-1.4.3.dmg",
-				Checksum: "sha256:client-143-demo", MinVersion: "1.3.0", RolloutPct: 100,
+				Checksum: "sha256:client-143-release", MinVersion: "1.3.0", RolloutPct: 100,
 				ReleaseNotes: "修复调度监控刷新、优化签收附件列表。", UploadedAt: "2026-06-19 07:30:00", PublishedAt: "2026-06-19 08:00:00",
 			},
 			{
 				ID: 2, PackageNo: "UP202606190002", Target: "server", ProductName: "CommonBuildMaterialsPlatform",
 				Version: "1.4.3", Channel: "stable", Status: "staged", FileName: "cbmp-appliance-1.4.3-linux-amd64.tar.gz",
-				Checksum: "sha256:server-143-demo", MinVersion: "1.3.0", RolloutPct: 25,
+				Checksum: "sha256:server-143-release", MinVersion: "1.3.0", RolloutPct: 25,
 				ReleaseNotes: "补齐授权验签日志、更新设备协议兼容层。", UploadedAt: "2026-06-19 07:40:00",
 			},
 		},

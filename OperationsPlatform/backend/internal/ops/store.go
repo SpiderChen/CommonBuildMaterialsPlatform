@@ -9,12 +9,13 @@ import (
 )
 
 type Store struct {
-	path string
-	mu   sync.Mutex
+	path     string
+	seedDemo bool
+	mu       sync.Mutex
 }
 
 func NewStore(path string) *Store {
-	return &Store{path: path}
+	return &Store{path: path, seedDemo: envTruthy(os.Getenv("CBM_OPS_SEED_DEMO"))}
 }
 
 func (s *Store) Snapshot() (AppData, error) {
@@ -43,7 +44,10 @@ func (s *Store) Update(fn func(*AppData) error) (AppData, error) {
 func (s *Store) loadLocked() (AppData, error) {
 	bytes, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		data := SeedData()
+		data := EmptyData()
+		if s.seedDemo {
+			data = SeedData()
+		}
 		if err := s.saveLocked(data); err != nil {
 			return AppData{}, err
 		}
@@ -74,6 +78,35 @@ func (s *Store) saveLocked(data AppData) error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+func EmptyData() AppData {
+	return AppData{
+		SchemaVersion: 1,
+		Next: map[string]int64{
+			"customer":   0,
+			"renewal":    0,
+			"alert":      0,
+			"package":    0,
+			"assignment": 0,
+			"audit":      0,
+		},
+		Customers:      []CustomerDeployment{},
+		Renewals:       []LicenseRenewal{},
+		Alerts:         []SystemAlert{},
+		UpdatePackages: []UpdatePackage{},
+		Assignments:    []UpdateAssignment{},
+		AuditLogs:      []AuditLog{},
+	}
+}
+
+func envTruthy(value string) bool {
+	switch value {
+	case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+		return true
+	default:
+		return false
+	}
 }
 
 func ensureNext(data *AppData) {

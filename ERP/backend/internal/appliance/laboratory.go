@@ -23,6 +23,8 @@ func (a *App) laboratory(w http.ResponseWriter, r *http.Request, session Session
 		switch parts[0] {
 		case "mix-designs":
 			writeJSON(w, http.StatusOK, data.MixDesigns)
+		case "mix-design-plant-profiles":
+			writeJSON(w, http.StatusOK, data.MixDesignPlantProfiles)
 		case "trial-runs":
 			writeJSON(w, http.StatusOK, data.MixDesignTrialRuns)
 		case "samples":
@@ -64,6 +66,21 @@ func (a *App) laboratory(w http.ResponseWriter, r *http.Request, session Session
 		a.createMixDesignTrialRun(w, r, session, id)
 		return
 	}
+	if len(parts) == 3 && parts[0] == "mix-designs" && parts[2] == "plant-profiles" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		a.createMixDesignPlantProfile(w, r, session, id)
+		return
+	}
+	if len(parts) == 3 && parts[0] == "mix-design-plant-profiles" && parts[2] == "approve" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		a.approveMixDesignPlantProfile(w, r, session, id)
+		return
+	}
+	if len(parts) == 3 && parts[0] == "mix-design-plant-profiles" && parts[2] == "retire" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		a.retireMixDesignPlantProfile(w, r, session, id)
+		return
+	}
 	if len(parts) == 1 && parts[0] == "samples" && r.Method == http.MethodPost {
 		a.createLaboratorySample(w, r, session)
 		return
@@ -101,22 +118,26 @@ func (a *App) laboratory(w http.ResponseWriter, r *http.Request, session Session
 
 func laboratoryPayload(data AppData) map[string]interface{} {
 	return map[string]interface{}{
-		"kpis":               buildLaboratoryKPI(data),
-		"mixDesigns":         listOrEmpty(data.MixDesigns),
-		"trialRuns":          listOrEmpty(data.MixDesignTrialRuns),
-		"qualityInspections": listOrEmpty(data.QualityInspections),
-		"qualitySamples":     listOrEmpty(data.QualitySamples),
-		"rawInspections":     listOrEmpty(data.RawMaterialInspections),
-		"samples":            listOrEmpty(data.LaboratorySamples),
-		"tests":              listOrEmpty(data.LaboratoryTests),
-		"equipment":          listOrEmpty(data.LaboratoryEquipment),
-		"calibrations":       listOrEmpty(data.LaboratoryCalibrations),
-		"exceptions":         listOrEmpty(data.QualityExceptions),
-		"batches":            listOrEmpty(data.ProductionBatches),
-		"receipts":           listOrEmpty(data.RawMaterialReceipts),
-		"products":           listOrEmpty(data.Products),
-		"materials":          listOrEmpty(data.Materials),
-		"sites":              listOrEmpty(data.Sites),
+		"kpis":                   buildLaboratoryKPI(data),
+		"mixDesigns":             listOrEmpty(data.MixDesigns),
+		"mixDesignPlantProfiles": listOrEmpty(data.MixDesignPlantProfiles),
+		"trialRuns":              listOrEmpty(data.MixDesignTrialRuns),
+		"qualityInspections":     listOrEmpty(data.QualityInspections),
+		"qualitySamples":         listOrEmpty(data.QualitySamples),
+		"rawInspections":         listOrEmpty(data.RawMaterialInspections),
+		"samples":                listOrEmpty(data.LaboratorySamples),
+		"tests":                  listOrEmpty(data.LaboratoryTests),
+		"equipment":              listOrEmpty(data.LaboratoryEquipment),
+		"calibrations":           listOrEmpty(data.LaboratoryCalibrations),
+		"exceptions":             listOrEmpty(data.QualityExceptions),
+		"batches":                listOrEmpty(data.ProductionBatches),
+		"receipts":               listOrEmpty(data.RawMaterialReceipts),
+		"products":               listOrEmpty(data.Products),
+		"materials":              listOrEmpty(data.Materials),
+		"sites":                  listOrEmpty(data.Sites),
+		"plants":                 listOrEmpty(data.Plants),
+		"plantBufferLocations":   listOrEmpty(data.PlantBufferLocations),
+		"dictionaries":           activeDataDictionaries(data.DataDictionaries),
 	}
 }
 
@@ -152,14 +173,16 @@ func (a *App) createLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, 
 		item.Code = fallback(req.Code, number("MD", item.ID))
 		item.Version = fallback(req.Version, "v1")
 		item.StrengthGrade = fallback(req.StrengthGrade, product.Spec)
-		item.Slump = fallback(req.Slump, "180mm")
+		item.Slump = fallback(req.Slump, "油石比 5.1%")
 		item.Scope = fallback(req.Scope, "站内标准生产配比")
 		item.Status = fallback(req.Status, "draft")
 		item.IsCurrent = false
 		item.CreatedBy = fallback(req.CreatedBy, session.User.DisplayName)
 		item.CreatedAt = nowString()
 		item.UpdatedAt = item.CreatedAt
-		normalizeMixMaterials(&item)
+		if err := validateMixMaterials(*data, &item); err != nil {
+			return err
+		}
 		data.MixDesigns = append(data.MixDesigns, item)
 		addAudit(data, session.User.Username, "create", "mix_design", item.ID, item.Code, clientIP(r))
 		return nil
@@ -203,7 +226,9 @@ func (a *App) reviseLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, 
 		if len(req.Materials) > 0 {
 			item.Materials = req.Materials
 		}
-		normalizeMixMaterials(&item)
+		if err := validateMixMaterials(*data, &item); err != nil {
+			return err
+		}
 		data.MixDesigns = append(data.MixDesigns, item)
 		addAudit(data, session.User.Username, "revise", "mix_design", item.ID, item.Code+" "+item.Version, clientIP(r))
 		return nil
@@ -211,17 +236,20 @@ func (a *App) reviseLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, 
 	a.respondMutation(w, err, item, "laboratory.mix_design.revised")
 }
 
+type mixDesignApprovalRequest struct {
+	EffectiveFrom string `json:"effectiveFrom"`
+	EffectiveTo   string `json:"effectiveTo"`
+	TrialRunID    int64  `json:"trialRunId"`
+}
+
 func (a *App) approveLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, session Session, id int64) {
-	var req struct {
-		EffectiveFrom string `json:"effectiveFrom"`
-		EffectiveTo   string `json:"effectiveTo"`
-		TrialRunID    int64  `json:"trialRunId"`
-	}
+	var req mixDesignApprovalRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid mix design approval")
 		return
 	}
 	var item MixDesign
+	topic := "laboratory.mix_design.approved"
 	err := a.store.Mutate(func(data *AppData) error {
 		idx := mixDesignIndex(*data, id)
 		if idx < 0 {
@@ -233,6 +261,9 @@ func (a *App) approveLaboratoryMixDesign(w http.ResponseWriter, r *http.Request,
 		if len(data.MixDesigns[idx].Materials) == 0 {
 			return fmt.Errorf("配比材料不能为空")
 		}
+		if err := validateMixMaterials(*data, &data.MixDesigns[idx]); err != nil {
+			return err
+		}
 		if req.TrialRunID > 0 {
 			trial, ok := findMixDesignTrialRun(*data, req.TrialRunID)
 			if !ok || trial.MixDesignID != id {
@@ -242,24 +273,91 @@ func (a *App) approveLaboratoryMixDesign(w http.ResponseWriter, r *http.Request,
 				return fmt.Errorf("试配未合格不能审批配比")
 			}
 		}
-		now := nowString()
-		data.MixDesigns[idx].Status = "approved"
-		data.MixDesigns[idx].IsCurrent = true
-		data.MixDesigns[idx].EffectiveFrom = fallback(req.EffectiveFrom, todayString())
-		data.MixDesigns[idx].EffectiveTo = fallback(req.EffectiveTo, data.MixDesigns[idx].EffectiveTo)
-		data.MixDesigns[idx].ApprovedBy = session.User.DisplayName
-		data.MixDesigns[idx].ApprovedAt = now
-		data.MixDesigns[idx].UpdatedAt = now
-		item = data.MixDesigns[idx]
-		retirePreviousCurrentMixDesigns(data, item.ID, item.ProductID, item.SiteID, now)
+		event, instances, err := publishMixDesignApprovalWorkflow(data, data.MixDesigns[idx], req, session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			data.MixDesigns[idx].Status = "pending_approval"
+			data.MixDesigns[idx].UpdatedAt = nowString()
+			item = data.MixDesigns[idx]
+			topic = "laboratory.mix_design.workflow_requested"
+			addAudit(data, session.User.Username, "request_approve", "mix_design", item.ID, item.Code+" "+item.Version, clientIP(r))
+			_ = event
+			return nil
+		}
+		next, err := applyMixDesignApprovalLocked(data, id, req, session.User.DisplayName)
+		if err != nil {
+			return err
+		}
+		item = next
 		addAudit(data, session.User.Username, "approve", "mix_design", item.ID, item.Code+" "+item.Version, clientIP(r))
 		return nil
 	})
-	a.respondMutation(w, err, item, "laboratory.mix_design.approved")
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishMixDesignApprovalWorkflow(data *AppData, item MixDesign, req mixDesignApprovalRequest, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "mix_design.submitted",
+		Source:     "laboratory",
+		Resource:   "mix_design",
+		ResourceID: item.ID,
+		ResourceNo: item.Code + " " + item.Version,
+		Title:      "生产配比审批",
+		Actor:      actor,
+		Reason:     fallback(item.Scope, "生产配比审批"),
+		Variables: map[string]string{
+			"workflowAction": "approve",
+			"productId":      fmt.Sprintf("%d", item.ProductID),
+			"siteId":         fmt.Sprintf("%d", item.SiteID),
+			"parentId":       fmt.Sprintf("%d", item.ParentID),
+			"code":           item.Code,
+			"version":        item.Version,
+			"strengthGrade":  item.StrengthGrade,
+			"trialRunId":     fmt.Sprintf("%d", req.TrialRunID),
+			"effectiveFrom":  req.EffectiveFrom,
+			"effectiveTo":    req.EffectiveTo,
+		},
+	})
+}
+
+func applyMixDesignApprovalLocked(data *AppData, id int64, req mixDesignApprovalRequest, actor string) (MixDesign, error) {
+	idx := mixDesignIndex(*data, id)
+	if idx < 0 {
+		return MixDesign{}, fmt.Errorf("配比不存在")
+	}
+	if len(data.MixDesigns[idx].Materials) == 0 {
+		return MixDesign{}, fmt.Errorf("配比材料不能为空")
+	}
+	if err := validateMixMaterials(*data, &data.MixDesigns[idx]); err != nil {
+		return MixDesign{}, err
+	}
+	if req.TrialRunID > 0 {
+		trial, ok := findMixDesignTrialRun(*data, req.TrialRunID)
+		if !ok || trial.MixDesignID != id {
+			return MixDesign{}, fmt.Errorf("试配记录不存在")
+		}
+		if trial.Result != "passed" {
+			return MixDesign{}, fmt.Errorf("试配未合格不能审批配比")
+		}
+	}
+	now := nowString()
+	data.MixDesigns[idx].Status = "approved"
+	data.MixDesigns[idx].IsCurrent = true
+	data.MixDesigns[idx].EffectiveFrom = fallback(req.EffectiveFrom, todayString())
+	data.MixDesigns[idx].EffectiveTo = fallback(req.EffectiveTo, data.MixDesigns[idx].EffectiveTo)
+	data.MixDesigns[idx].ApprovedBy = actor
+	data.MixDesigns[idx].ApprovedAt = now
+	data.MixDesigns[idx].UpdatedAt = now
+	item := data.MixDesigns[idx]
+	retirePreviousCurrentMixDesigns(data, item.ID, item.ProductID, item.SiteID, now)
+	return item, nil
 }
 
 func (a *App) retireLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, session Session, id int64) {
 	var item MixDesign
+	topic := "laboratory.mix_design.retired"
 	err := a.store.Mutate(func(data *AppData) error {
 		idx := mixDesignIndex(*data, id)
 		if idx < 0 {
@@ -268,15 +366,320 @@ func (a *App) retireLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, 
 		if session.User.SiteID > 0 && data.MixDesigns[idx].SiteID != 0 && data.MixDesigns[idx].SiteID != session.User.SiteID {
 			return fmt.Errorf("无权停用其他站点配比")
 		}
-		data.MixDesigns[idx].Status = "retired"
-		data.MixDesigns[idx].IsCurrent = false
-		data.MixDesigns[idx].RetiredAt = nowString()
-		data.MixDesigns[idx].UpdatedAt = data.MixDesigns[idx].RetiredAt
-		item = data.MixDesigns[idx]
+		if data.MixDesigns[idx].Status == "retired" {
+			item = data.MixDesigns[idx]
+			return nil
+		}
+		if hasPendingWorkflowForResource(*data, "mix_design", id) {
+			item = data.MixDesigns[idx]
+			topic = "laboratory.mix_design.retire_requested"
+			return nil
+		}
+		_, instances, err := publishMixDesignRetireWorkflow(data, data.MixDesigns[idx], session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			item = data.MixDesigns[idx]
+			topic = "laboratory.mix_design.retire_requested"
+			addAudit(data, session.User.Username, "request_retire", "mix_design", item.ID, item.Code+" "+item.Version, clientIP(r))
+			return nil
+		}
+		next, err := applyMixDesignRetireLocked(data, id)
+		if err != nil {
+			return err
+		}
+		item = next
 		addAudit(data, session.User.Username, "retire", "mix_design", item.ID, item.Code+" "+item.Version, clientIP(r))
 		return nil
 	})
-	a.respondMutation(w, err, item, "laboratory.mix_design.retired")
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishMixDesignRetireWorkflow(data *AppData, item MixDesign, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "mix_design.retire_requested",
+		Source:     "laboratory",
+		Resource:   "mix_design",
+		ResourceID: item.ID,
+		ResourceNo: item.Code + " " + item.Version,
+		Title:      "生产配比退役",
+		Actor:      actor,
+		Reason:     fallback(item.Scope, "生产配比退役审批"),
+		Variables: map[string]string{
+			"workflowAction": "retire",
+			"productId":      fmt.Sprintf("%d", item.ProductID),
+			"siteId":         fmt.Sprintf("%d", item.SiteID),
+			"code":           item.Code,
+			"version":        item.Version,
+			"isCurrent":      fmt.Sprintf("%t", item.IsCurrent),
+		},
+	})
+}
+
+func applyMixDesignRetireLocked(data *AppData, id int64) (MixDesign, error) {
+	idx := mixDesignIndex(*data, id)
+	if idx < 0 {
+		return MixDesign{}, fmt.Errorf("配比不存在")
+	}
+	data.MixDesigns[idx].Status = "retired"
+	data.MixDesigns[idx].IsCurrent = false
+	data.MixDesigns[idx].RetiredAt = nowString()
+	data.MixDesigns[idx].UpdatedAt = data.MixDesigns[idx].RetiredAt
+	return data.MixDesigns[idx], nil
+}
+
+func (a *App) createMixDesignPlantProfile(w http.ResponseWriter, r *http.Request, session Session, mixDesignID int64) {
+	var req MixDesignPlantProfile
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid mix design plant profile")
+		return
+	}
+	var item MixDesignPlantProfile
+	err := a.store.Mutate(func(data *AppData) error {
+		base, ok := findMixDesign(*data, mixDesignID)
+		if !ok {
+			return fmt.Errorf("配比不存在")
+		}
+		if base.Status != "approved" {
+			return fmt.Errorf("基础配比未审批不能配置生产线微调")
+		}
+		if session.User.SiteID > 0 && base.SiteID != 0 && base.SiteID != session.User.SiteID {
+			return fmt.Errorf("无权操作其他站点配比")
+		}
+		plant, ok := findPlantByID(*data, req.PlantID)
+		if !ok {
+			return fmt.Errorf("生产线不存在")
+		}
+		if base.SiteID != 0 && plant.SiteID != base.SiteID {
+			return fmt.Errorf("生产线必须属于基础配比站点")
+		}
+		if session.User.SiteID > 0 && plant.SiteID != session.User.SiteID {
+			return fmt.Errorf("无权操作其他站点生产线")
+		}
+		item = req
+		item.ID = nextID(data, "mixPlantProfile")
+		item.MixDesignID = base.ID
+		item.ProductID = base.ProductID
+		item.SiteID = plant.SiteID
+		item.PlantID = plant.ID
+		item.PlantCode = plant.Code
+		item.Code = fallback(req.Code, base.Code+"-"+plant.Code)
+		item.Version = fallback(req.Version, base.Version+"-line")
+		item.Scope = fallback(req.Scope, plant.Name+"生产线配比")
+		item.Status = fallback(req.Status, "approved")
+		item.IsCurrent = item.Status == "approved"
+		item.EffectiveFrom = fallback(req.EffectiveFrom, todayString())
+		item.EffectiveTo = req.EffectiveTo
+		item.CreatedBy = fallback(req.CreatedBy, session.User.DisplayName)
+		item.CreatedAt = nowString()
+		item.UpdatedAt = item.CreatedAt
+		if item.Status == "approved" {
+			item.ApprovedBy = fallback(req.ApprovedBy, session.User.DisplayName)
+			item.ApprovedAt = item.CreatedAt
+		}
+		if err := validateMixDesignPlantProfile(*data, base, &item); err != nil {
+			return err
+		}
+		if item.Status == "approved" {
+			_, instances, err := publishMixDesignPlantProfileWorkflow(data, item, mixDesignPlantProfileApprovalRequest{EffectiveFrom: item.EffectiveFrom, EffectiveTo: item.EffectiveTo}, session.User.Username)
+			if err != nil {
+				return err
+			}
+			if len(instances) > 0 {
+				item.Status = "pending_approval"
+				item.IsCurrent = false
+				item.ApprovedBy = ""
+				item.ApprovedAt = ""
+			}
+		}
+		if item.Status == "approved" && item.IsCurrent {
+			retirePreviousCurrentMixDesignPlantProfiles(data, item.ID, item.MixDesignID, item.PlantID, item.UpdatedAt)
+		}
+		data.MixDesignPlantProfiles = append(data.MixDesignPlantProfiles, item)
+		addAudit(data, session.User.Username, "create", "mix_design_plant_profile", item.ID, item.Code+" "+item.Version, clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, item, "laboratory.mix_design_plant_profile.created")
+}
+
+type mixDesignPlantProfileApprovalRequest struct {
+	EffectiveFrom string `json:"effectiveFrom"`
+	EffectiveTo   string `json:"effectiveTo"`
+}
+
+func (a *App) approveMixDesignPlantProfile(w http.ResponseWriter, r *http.Request, session Session, id int64) {
+	var req mixDesignPlantProfileApprovalRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid mix design plant profile approval")
+		return
+	}
+	var item MixDesignPlantProfile
+	topic := "laboratory.mix_design_plant_profile.approved"
+	err := a.store.Mutate(func(data *AppData) error {
+		idx := mixDesignPlantProfileIndex(*data, id)
+		if idx < 0 {
+			return fmt.Errorf("生产线配比不存在")
+		}
+		base, ok := findMixDesign(*data, data.MixDesignPlantProfiles[idx].MixDesignID)
+		if !ok {
+			return fmt.Errorf("基础配比不存在")
+		}
+		if session.User.SiteID > 0 && data.MixDesignPlantProfiles[idx].SiteID != session.User.SiteID {
+			return fmt.Errorf("无权审批其他站点生产线配比")
+		}
+		if err := validateMixDesignPlantProfile(*data, base, &data.MixDesignPlantProfiles[idx]); err != nil {
+			return err
+		}
+		_, instances, err := publishMixDesignPlantProfileWorkflow(data, data.MixDesignPlantProfiles[idx], req, session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			data.MixDesignPlantProfiles[idx].Status = "pending_approval"
+			data.MixDesignPlantProfiles[idx].IsCurrent = false
+			data.MixDesignPlantProfiles[idx].UpdatedAt = nowString()
+			item = data.MixDesignPlantProfiles[idx]
+			topic = "laboratory.mix_design_plant_profile.workflow_requested"
+			addAudit(data, session.User.Username, "request_approve", "mix_design_plant_profile", item.ID, item.Code+" "+item.Version, clientIP(r))
+			return nil
+		}
+		next, err := applyMixDesignPlantProfileApprovalLocked(data, id, req, session.User.DisplayName)
+		if err != nil {
+			return err
+		}
+		item = next
+		addAudit(data, session.User.Username, "approve", "mix_design_plant_profile", item.ID, item.Code+" "+item.Version, clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishMixDesignPlantProfileWorkflow(data *AppData, item MixDesignPlantProfile, req mixDesignPlantProfileApprovalRequest, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "mix_design_plant_profile.submitted",
+		Source:     "laboratory",
+		Resource:   "mix_design_plant_profile",
+		ResourceID: item.ID,
+		ResourceNo: item.Code + " " + item.Version,
+		Title:      "生产线配比审批",
+		Actor:      actor,
+		Reason:     fallback(item.Scope, "生产线配比微调审批"),
+		Variables: map[string]string{
+			"workflowAction": "approve",
+			"mixDesignId":    fmt.Sprintf("%d", item.MixDesignID),
+			"productId":      fmt.Sprintf("%d", item.ProductID),
+			"siteId":         fmt.Sprintf("%d", item.SiteID),
+			"plantId":        fmt.Sprintf("%d", item.PlantID),
+			"plantCode":      item.PlantCode,
+			"code":           item.Code,
+			"version":        item.Version,
+			"effectiveFrom":  fallback(req.EffectiveFrom, item.EffectiveFrom),
+			"effectiveTo":    fallback(req.EffectiveTo, item.EffectiveTo),
+		},
+	})
+}
+
+func applyMixDesignPlantProfileApprovalLocked(data *AppData, id int64, req mixDesignPlantProfileApprovalRequest, actor string) (MixDesignPlantProfile, error) {
+	idx := mixDesignPlantProfileIndex(*data, id)
+	if idx < 0 {
+		return MixDesignPlantProfile{}, fmt.Errorf("生产线配比不存在")
+	}
+	base, ok := findMixDesign(*data, data.MixDesignPlantProfiles[idx].MixDesignID)
+	if !ok {
+		return MixDesignPlantProfile{}, fmt.Errorf("基础配比不存在")
+	}
+	if err := validateMixDesignPlantProfile(*data, base, &data.MixDesignPlantProfiles[idx]); err != nil {
+		return MixDesignPlantProfile{}, err
+	}
+	now := nowString()
+	data.MixDesignPlantProfiles[idx].Status = "approved"
+	data.MixDesignPlantProfiles[idx].IsCurrent = true
+	data.MixDesignPlantProfiles[idx].EffectiveFrom = fallback(req.EffectiveFrom, todayString())
+	data.MixDesignPlantProfiles[idx].EffectiveTo = fallback(req.EffectiveTo, data.MixDesignPlantProfiles[idx].EffectiveTo)
+	data.MixDesignPlantProfiles[idx].ApprovedBy = actor
+	data.MixDesignPlantProfiles[idx].ApprovedAt = now
+	data.MixDesignPlantProfiles[idx].UpdatedAt = now
+	item := data.MixDesignPlantProfiles[idx]
+	retirePreviousCurrentMixDesignPlantProfiles(data, item.ID, item.MixDesignID, item.PlantID, now)
+	return item, nil
+}
+
+func (a *App) retireMixDesignPlantProfile(w http.ResponseWriter, r *http.Request, session Session, id int64) {
+	var item MixDesignPlantProfile
+	topic := "laboratory.mix_design_plant_profile.retired"
+	err := a.store.Mutate(func(data *AppData) error {
+		idx := mixDesignPlantProfileIndex(*data, id)
+		if idx < 0 {
+			return fmt.Errorf("生产线配比不存在")
+		}
+		if session.User.SiteID > 0 && data.MixDesignPlantProfiles[idx].SiteID != session.User.SiteID {
+			return fmt.Errorf("无权停用其他站点生产线配比")
+		}
+		if data.MixDesignPlantProfiles[idx].Status == "retired" {
+			item = data.MixDesignPlantProfiles[idx]
+			return nil
+		}
+		if hasPendingWorkflowForResource(*data, "mix_design_plant_profile", id) {
+			item = data.MixDesignPlantProfiles[idx]
+			topic = "laboratory.mix_design_plant_profile.retire_requested"
+			return nil
+		}
+		_, instances, err := publishMixDesignPlantProfileRetireWorkflow(data, data.MixDesignPlantProfiles[idx], session.User.Username)
+		if err != nil {
+			return err
+		}
+		if len(instances) > 0 {
+			item = data.MixDesignPlantProfiles[idx]
+			topic = "laboratory.mix_design_plant_profile.retire_requested"
+			addAudit(data, session.User.Username, "request_retire", "mix_design_plant_profile", item.ID, item.Code+" "+item.Version, clientIP(r))
+			return nil
+		}
+		next, err := applyMixDesignPlantProfileRetireLocked(data, id)
+		if err != nil {
+			return err
+		}
+		item = next
+		addAudit(data, session.User.Username, "retire", "mix_design_plant_profile", item.ID, item.Code+" "+item.Version, clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishMixDesignPlantProfileRetireWorkflow(data *AppData, item MixDesignPlantProfile, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "mix_design_plant_profile.retire_requested",
+		Source:     "laboratory",
+		Resource:   "mix_design_plant_profile",
+		ResourceID: item.ID,
+		ResourceNo: item.Code + " " + item.Version,
+		Title:      "生产线配比退役",
+		Actor:      actor,
+		Reason:     fallback(item.Scope, "生产线配比退役审批"),
+		Variables: map[string]string{
+			"workflowAction": "retire",
+			"mixDesignId":    fmt.Sprintf("%d", item.MixDesignID),
+			"productId":      fmt.Sprintf("%d", item.ProductID),
+			"siteId":         fmt.Sprintf("%d", item.SiteID),
+			"plantId":        fmt.Sprintf("%d", item.PlantID),
+			"plantCode":      item.PlantCode,
+			"code":           item.Code,
+			"version":        item.Version,
+			"isCurrent":      fmt.Sprintf("%t", item.IsCurrent),
+		},
+	})
+}
+
+func applyMixDesignPlantProfileRetireLocked(data *AppData, id int64) (MixDesignPlantProfile, error) {
+	idx := mixDesignPlantProfileIndex(*data, id)
+	if idx < 0 {
+		return MixDesignPlantProfile{}, fmt.Errorf("生产线配比不存在")
+	}
+	data.MixDesignPlantProfiles[idx].Status = "retired"
+	data.MixDesignPlantProfiles[idx].IsCurrent = false
+	data.MixDesignPlantProfiles[idx].RetiredAt = nowString()
+	data.MixDesignPlantProfiles[idx].UpdatedAt = data.MixDesignPlantProfiles[idx].RetiredAt
+	return data.MixDesignPlantProfiles[idx], nil
 }
 
 func (a *App) createMixDesignTrialRun(w http.ResponseWriter, r *http.Request, session Session, mixDesignID int64) {
@@ -392,6 +795,7 @@ func (a *App) reviewLaboratoryTest(w http.ResponseWriter, r *http.Request, sessi
 		return
 	}
 	var item LaboratoryTestRecord
+	topic := "laboratory.test.reviewed"
 	err := a.store.Mutate(func(data *AppData) error {
 		idx := laboratoryTestIndex(*data, testID)
 		if idx < 0 {
@@ -400,25 +804,78 @@ func (a *App) reviewLaboratoryTest(w http.ResponseWriter, r *http.Request, sessi
 		if session.User.SiteID > 0 && data.LaboratoryTests[idx].SiteID != session.User.SiteID {
 			return fmt.Errorf("无权复核其他站点试验")
 		}
-		if req.Result != "" {
-			data.LaboratoryTests[idx].Result = req.Result
+		_, instances, err := publishLaboratoryTestReviewWorkflow(data, data.LaboratoryTests[idx], req, session.User.Username)
+		if err != nil {
+			return err
 		}
-		if req.Value > 0 {
-			data.LaboratoryTests[idx].Value = req.Value
+		if len(instances) > 0 {
+			data.LaboratoryTests[idx].Status = "pending_approval"
+			item = data.LaboratoryTests[idx]
+			topic = "laboratory.test.workflow_requested"
+			addAudit(data, session.User.Username, "request_review", "laboratory_test", item.ID, item.TestNo, clientIP(r))
+			return nil
 		}
-		data.LaboratoryTests[idx].Status = "reviewed"
-		data.LaboratoryTests[idx].Reviewer = fallback(req.Reviewer, session.User.DisplayName)
-		data.LaboratoryTests[idx].ReviewedAt = nowString()
-		data.LaboratoryTests[idx].Remark = fallback(req.Remark, data.LaboratoryTests[idx].Remark)
-		item = data.LaboratoryTests[idx]
-		updateLaboratorySample(data, item.SampleID, "completed", item.Result)
-		if item.Result == "failed" {
-			appendQualityException(data, "laboratory_test", item.ID, item.SiteID, "试验结果不合格", "试验 "+item.TestNo+" 复核为不合格", "high", session.User.DisplayName)
+		next, err := applyLaboratoryTestReviewLocked(data, testID, req, session.User.DisplayName)
+		if err != nil {
+			return err
 		}
+		item = next
 		addAudit(data, session.User.Username, "review", "laboratory_test", item.ID, item.TestNo, clientIP(r))
 		return nil
 	})
-	a.respondMutation(w, err, item, "laboratory.test.reviewed")
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishLaboratoryTestReviewWorkflow(data *AppData, item LaboratoryTestRecord, req LaboratoryTestRecord, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	value := item.Value
+	if req.Value > 0 {
+		value = req.Value
+	}
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "laboratory_test.review_requested",
+		Source:     "laboratory",
+		Resource:   "laboratory_test",
+		ResourceID: item.ID,
+		ResourceNo: item.TestNo,
+		Title:      "试验复核 " + item.TestNo,
+		Actor:      actor,
+		Reason:     fallback(req.Remark, "实验室试验复核"),
+		Variables: map[string]string{
+			"sampleId":    fmt.Sprintf("%d", item.SampleID),
+			"equipmentId": fmt.Sprintf("%d", item.EquipmentID),
+			"siteId":      fmt.Sprintf("%d", item.SiteID),
+			"testType":    item.TestType,
+			"metric":      item.Metric,
+			"value":       fmt.Sprintf("%.4f", value),
+			"unit":        item.Unit,
+			"result":      fallback(req.Result, item.Result),
+			"reviewer":    req.Reviewer,
+			"remark":      fallback(req.Remark, item.Remark),
+		},
+	})
+}
+
+func applyLaboratoryTestReviewLocked(data *AppData, testID int64, req LaboratoryTestRecord, actor string) (LaboratoryTestRecord, error) {
+	idx := laboratoryTestIndex(*data, testID)
+	if idx < 0 {
+		return LaboratoryTestRecord{}, fmt.Errorf("试验记录不存在")
+	}
+	if req.Result != "" {
+		data.LaboratoryTests[idx].Result = req.Result
+	}
+	if req.Value > 0 {
+		data.LaboratoryTests[idx].Value = req.Value
+	}
+	data.LaboratoryTests[idx].Status = "reviewed"
+	data.LaboratoryTests[idx].Reviewer = fallback(req.Reviewer, actor)
+	data.LaboratoryTests[idx].ReviewedAt = nowString()
+	data.LaboratoryTests[idx].Remark = fallback(req.Remark, data.LaboratoryTests[idx].Remark)
+	item := data.LaboratoryTests[idx]
+	updateLaboratorySample(data, item.SampleID, "completed", item.Result)
+	if item.Result == "failed" {
+		appendQualityException(data, "laboratory_test", item.ID, item.SiteID, "试验结果不合格", "试验 "+item.TestNo+" 复核为不合格", "high", actor)
+	}
+	return item, nil
 }
 
 func (a *App) createLaboratoryEquipment(w http.ResponseWriter, r *http.Request, session Session) {
@@ -514,6 +971,9 @@ func (a *App) createLaboratoryException(w http.ResponseWriter, r *http.Request, 
 		item.Responsible = fallback(req.Responsible, session.User.DisplayName)
 		item.CreatedAt = fallback(req.CreatedAt, nowString())
 		data.QualityExceptions = append(data.QualityExceptions, item)
+		if err := publishQualityExceptionWorkflow(data, item, session.User.Username); err != nil {
+			return err
+		}
 		addAudit(data, session.User.Username, "create", "quality_exception", item.ID, item.ExceptionNo, clientIP(r))
 		return nil
 	})
@@ -527,6 +987,7 @@ func (a *App) handleLaboratoryException(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var item QualityException
+	topic := "laboratory.exception.handled"
 	err := a.store.Mutate(func(data *AppData) error {
 		for i := range data.QualityExceptions {
 			if data.QualityExceptions[i].ID != id {
@@ -535,19 +996,72 @@ func (a *App) handleLaboratoryException(w http.ResponseWriter, r *http.Request, 
 			if session.User.SiteID > 0 && data.QualityExceptions[i].SiteID != session.User.SiteID {
 				return fmt.Errorf("无权关闭其他站点异常")
 			}
-			data.QualityExceptions[i].RootCause = fallback(req.RootCause, data.QualityExceptions[i].RootCause)
-			data.QualityExceptions[i].CorrectiveAction = fallback(req.CorrectiveAction, data.QualityExceptions[i].CorrectiveAction)
-			data.QualityExceptions[i].Responsible = fallback(req.Responsible, data.QualityExceptions[i].Responsible)
-			data.QualityExceptions[i].Status = "closed"
-			data.QualityExceptions[i].HandledAt = nowString()
-			data.QualityExceptions[i].ClosedBy = session.User.DisplayName
-			item = data.QualityExceptions[i]
+			if hasPendingWorkflowForEvent(*data, "quality_exception", id, "quality_exception.close_requested") {
+				item = data.QualityExceptions[i]
+				topic = "laboratory.exception.close_requested"
+				return nil
+			}
+			_, instances, err := publishQualityExceptionCloseWorkflow(data, data.QualityExceptions[i], req, session.User.Username)
+			if err != nil {
+				return err
+			}
+			if len(instances) > 0 {
+				item = data.QualityExceptions[i]
+				topic = "laboratory.exception.close_requested"
+				addAudit(data, session.User.Username, "request_close", "quality_exception", item.ID, item.ExceptionNo, clientIP(r))
+				return nil
+			}
+			next, err := applyQualityExceptionCloseLocked(data, id, req, session.User.DisplayName)
+			if err != nil {
+				return err
+			}
+			item = next
 			addAudit(data, session.User.Username, "handle", "quality_exception", item.ID, item.ExceptionNo, clientIP(r))
 			return nil
 		}
 		return fmt.Errorf("质量异常不存在")
 	})
-	a.respondMutation(w, err, item, "laboratory.exception.handled")
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishQualityExceptionCloseWorkflow(data *AppData, item QualityException, req QualityException, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "quality_exception.close_requested",
+		Source:     "laboratory",
+		Resource:   "quality_exception",
+		ResourceID: item.ID,
+		ResourceNo: item.ExceptionNo,
+		Title:      "质量异常关闭 " + item.ExceptionNo,
+		Actor:      actor,
+		Reason:     fallback(strings.TrimSpace(req.CorrectiveAction), fallback(strings.TrimSpace(item.Description), "质量异常关闭审批")),
+		Variables: map[string]string{
+			"severity":         item.Severity,
+			"sourceType":       item.SourceType,
+			"sourceId":         fmt.Sprintf("%d", item.SourceID),
+			"siteId":           fmt.Sprintf("%d", item.SiteID),
+			"responsible":      fallback(strings.TrimSpace(req.Responsible), item.Responsible),
+			"rootCause":        fallback(strings.TrimSpace(req.RootCause), item.RootCause),
+			"correctiveAction": fallback(strings.TrimSpace(req.CorrectiveAction), item.CorrectiveAction),
+			"targetStatus":     "closed",
+			"currentStatus":    item.Status,
+		},
+	})
+}
+
+func applyQualityExceptionCloseLocked(data *AppData, id int64, req QualityException, closedBy string) (QualityException, error) {
+	for i := range data.QualityExceptions {
+		if data.QualityExceptions[i].ID != id {
+			continue
+		}
+		data.QualityExceptions[i].RootCause = fallback(req.RootCause, data.QualityExceptions[i].RootCause)
+		data.QualityExceptions[i].CorrectiveAction = fallback(req.CorrectiveAction, data.QualityExceptions[i].CorrectiveAction)
+		data.QualityExceptions[i].Responsible = fallback(req.Responsible, data.QualityExceptions[i].Responsible)
+		data.QualityExceptions[i].Status = "closed"
+		data.QualityExceptions[i].HandledAt = nowString()
+		data.QualityExceptions[i].ClosedBy = closedBy
+		return data.QualityExceptions[i], nil
+	}
+	return QualityException{}, fmt.Errorf("质量异常不存在")
 }
 
 func buildLaboratoryKPI(data AppData) LaboratoryKPI {
@@ -613,12 +1127,93 @@ func laboratorySiteID(data AppData, session Session, requested int64) (int64, er
 	return 0, fmt.Errorf("站点不存在")
 }
 
-func normalizeMixMaterials(item *MixDesign) {
+func validateMixMaterials(data AppData, item *MixDesign) error {
+	if len(item.Materials) == 0 {
+		return fmt.Errorf("配比材料不能为空")
+	}
+	seen := map[int64]bool{}
 	for i := range item.Materials {
+		materialID := item.Materials[i].MaterialID
+		if materialID <= 0 {
+			return fmt.Errorf("配比材料必须选择物料")
+		}
+		if seen[materialID] {
+			return fmt.Errorf("配比材料不能重复")
+		}
+		material, ok := findMaterial(data, materialID)
+		if !ok {
+			return fmt.Errorf("配比材料不存在")
+		}
+		if material.Status != "" && material.Status != "active" {
+			return fmt.Errorf("配比材料已停用")
+		}
+		if item.Materials[i].Dosage <= 0 {
+			return fmt.Errorf("%s 用量必须大于 0", material.Name)
+		}
 		if item.Materials[i].Unit == "" {
-			item.Materials[i].Unit = "kg/m3"
+			item.Materials[i].Unit = "kg/t"
+		}
+		seen[materialID] = true
+	}
+	return nil
+}
+
+func validateMixDesignPlantProfile(data AppData, base MixDesign, item *MixDesignPlantProfile) error {
+	if item.MixDesignID != base.ID {
+		return fmt.Errorf("生产线配比必须关联基础配比")
+	}
+	if item.PlantID == 0 {
+		return fmt.Errorf("生产线不能为空")
+	}
+	plant, ok := findPlantByID(data, item.PlantID)
+	if !ok {
+		return fmt.Errorf("生产线不存在")
+	}
+	if base.SiteID != 0 && plant.SiteID != base.SiteID {
+		return fmt.Errorf("生产线必须属于基础配比站点")
+	}
+	baseMaterials := map[int64]MixDesignMaterial{}
+	for _, material := range base.Materials {
+		baseMaterials[material.MaterialID] = material
+	}
+	seen := map[int64]bool{}
+	for i := range item.Materials {
+		material := &item.Materials[i]
+		if material.MaterialID <= 0 {
+			return fmt.Errorf("微调物料不能为空")
+		}
+		baseMaterial, ok := baseMaterials[material.MaterialID]
+		if !ok {
+			return fmt.Errorf("微调物料必须存在于基础配比")
+		}
+		if _, ok := findMaterial(data, material.MaterialID); !ok {
+			return fmt.Errorf("微调物料不存在")
+		}
+		if seen[material.MaterialID] {
+			return fmt.Errorf("微调物料不能重复")
+		}
+		seen[material.MaterialID] = true
+		material.Unit = fallback(material.Unit, baseMaterial.Unit)
+		if material.Dosage < 0 {
+			return fmt.Errorf("微调用量不能小于 0")
+		}
+		if material.Dosage == 0 && material.Adjustment == 0 && material.BufferID == 0 && strings.TrimSpace(material.BufferCode) == "" {
+			return fmt.Errorf("微调项必须填写用量、增减量或筒仓")
+		}
+		if material.BufferID != 0 || strings.TrimSpace(material.BufferCode) != "" {
+			buffer, ok := findPlantBufferForProfile(data, item.PlantID, material.BufferID, material.BufferCode)
+			if !ok {
+				return fmt.Errorf("微调筒仓不存在")
+			}
+			if !productionLineBufferCanCarryMaterial(buffer, material.MaterialID) {
+				return fmt.Errorf("微调筒仓不能承接该物料")
+			}
+			material.BufferID = buffer.ID
+			material.BufferCode = buffer.Code
 		}
 	}
+	applied := applyMixDesignPlantProfile(base, *item)
+	return validateMixMaterials(data, &applied)
 }
 
 func nextMixVersion(value string) string {
@@ -639,6 +1234,15 @@ func mixDesignIndex(data AppData, id int64) int {
 	return -1
 }
 
+func mixDesignPlantProfileIndex(data AppData, id int64) int {
+	for i := range data.MixDesignPlantProfiles {
+		if data.MixDesignPlantProfiles[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func retirePreviousCurrentMixDesigns(data *AppData, currentID, productID, siteID int64, retiredAt string) {
 	for i := range data.MixDesigns {
 		if data.MixDesigns[i].ID == currentID || data.MixDesigns[i].ProductID != productID {
@@ -652,6 +1256,22 @@ func retirePreviousCurrentMixDesigns(data *AppData, currentID, productID, siteID
 			data.MixDesigns[i].Status = "retired"
 			data.MixDesigns[i].RetiredAt = retiredAt
 			data.MixDesigns[i].UpdatedAt = retiredAt
+		}
+	}
+}
+
+func retirePreviousCurrentMixDesignPlantProfiles(data *AppData, currentID, mixDesignID, plantID int64, retiredAt string) {
+	for i := range data.MixDesignPlantProfiles {
+		if data.MixDesignPlantProfiles[i].ID == currentID ||
+			data.MixDesignPlantProfiles[i].MixDesignID != mixDesignID ||
+			data.MixDesignPlantProfiles[i].PlantID != plantID {
+			continue
+		}
+		if data.MixDesignPlantProfiles[i].IsCurrent && data.MixDesignPlantProfiles[i].Status == "approved" {
+			data.MixDesignPlantProfiles[i].IsCurrent = false
+			data.MixDesignPlantProfiles[i].Status = "retired"
+			data.MixDesignPlantProfiles[i].RetiredAt = retiredAt
+			data.MixDesignPlantProfiles[i].UpdatedAt = retiredAt
 		}
 	}
 }
@@ -761,7 +1381,31 @@ func appendQualityException(data *AppData, sourceType string, sourceID, siteID i
 		Responsible: responsible, CreatedAt: nowString(),
 	}
 	data.QualityExceptions = append(data.QualityExceptions, item)
+	_ = publishQualityExceptionWorkflow(data, item, fallback(responsible, "system"))
 	return item
+}
+
+func publishQualityExceptionWorkflow(data *AppData, item QualityException, actor string) error {
+	eventKey := "quality_exception:" + item.ExceptionNo
+	_, _, err := publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "quality_exception.submitted",
+		Source:     "laboratory",
+		EventKey:   eventKey,
+		Resource:   "quality_exception",
+		ResourceID: item.ID,
+		ResourceNo: item.ExceptionNo,
+		Title:      fallback(item.Title, "质量异常"),
+		Actor:      actor,
+		Reason:     item.Description,
+		Variables: map[string]string{
+			"severity":    item.Severity,
+			"sourceType":  item.SourceType,
+			"sourceId":    fmt.Sprintf("%d", item.SourceID),
+			"siteId":      fmt.Sprintf("%d", item.SiteID),
+			"responsible": item.Responsible,
+		},
+	})
+	return err
 }
 
 func labAddDays(value string, days int) string {

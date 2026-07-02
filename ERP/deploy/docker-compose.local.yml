@@ -1,0 +1,47 @@
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    depends_on:
+      - cbmp-appliance
+    ports:
+      - "${CBMP_GATEWAY_PORT:-8080}:80"
+    networks:
+      - cbmp-local
+
+  cbmp-appliance:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    environment:
+      CBMP_ADDR: 0.0.0.0:8088
+      CBMP_DATA: /data/app.vault
+      CBMP_DATA_KEY: ${CBMP_DATA_KEY:?set CBMP_DATA_KEY in ERP/deploy/.env}
+      CBMP_INITIAL_ADMIN_PASSWORD: ${CBMP_INITIAL_ADMIN_PASSWORD:?set CBMP_INITIAL_ADMIN_PASSWORD in ERP/deploy/.env}
+      CBMP_PUBLIC_BASE_URL: ${CBMP_PUBLIC_BASE_URL:-http://localhost:8080}
+      CBMP_BACKUP_DIR: /data/backups
+      CBMP_BACKUP_KEY: ${CBMP_BACKUP_KEY:-}
+      CBMP_ENFORCE_IP_WHITELIST: ${CBMP_ENFORCE_IP_WHITELIST:-0}
+      CBMP_UPDATE_SIGNING_SECRET: ${CBMP_UPDATE_SIGNING_SECRET:-}
+      CBMP_COLLECTION_CALLBACK_SECRET: ${CBMP_COLLECTION_CALLBACK_SECRET:-}
+      CBMP_TAX_GATEWAY_URL: ${CBMP_TAX_GATEWAY_URL:-}
+      CBMP_TAX_GATEWAY_PROVIDER: ${CBMP_TAX_GATEWAY_PROVIDER:-}
+      CBMP_TAX_GATEWAY_TOKEN: ${CBMP_TAX_GATEWAY_TOKEN:-}
+      CBMP_TAX_GATEWAY_SECRET: ${CBMP_TAX_GATEWAY_SECRET:-}
+      CBMP_MAP_PROVIDER: ${CBMP_MAP_PROVIDER:-}
+      CBMP_MAP_TILE_URL: ${CBMP_MAP_TILE_URL:-}
+      CBMP_MAP_API_KEY: ${CBMP_MAP_API_KEY:-}
+    volumes:
+      - cbmp_local_data:/data
+    networks:
+      - cbmp-local
+
+volumes:
+  cbmp_local_data:
+
+networks:
+  cbmp-local:
+    driver: bridge

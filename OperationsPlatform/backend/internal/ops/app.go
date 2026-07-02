@@ -64,10 +64,41 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "product-ops" && parts[1] == "system-updates" && parts[2] == "tasks":
+		var req UpdateTaskPollRequest
+		if decodeBody(w, r, &req) {
+			if req.UpdaterToken == "" {
+				req.UpdaterToken = r.Header.Get("X-CBMP-Updater-Token")
+			}
+			a.updateJSON(w, func(data *AppData) (interface{}, error) { return PollUpdateTasks(data, req) })
+		}
+	case r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "product-ops" && parts[1] == "system-updates" && parts[2] == "tasks" && parts[4] == "report":
+		var req UpdateTaskReportRequest
+		if decodeBody(w, r, &req) {
+			if req.UpdaterToken == "" {
+				req.UpdaterToken = r.Header.Get("X-CBMP-Updater-Token")
+			}
+			taskNo := parts[3]
+			a.updateJSON(w, func(data *AppData) (interface{}, error) { return ReportUpdateTask(data, taskNo, req) })
+		}
+	case r.Method == http.MethodGet && len(parts) == 4 && parts[0] == "system" && parts[1] == "updates" && parts[3] == "download":
+		id, ok := parseID(w, parts[2])
+		if ok {
+			assignmentID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("assignmentId")), 10, 64)
+			updaterToken := r.Header.Get("X-CBMP-Updater-Token")
+			a.updateJSON(w, func(data *AppData) (interface{}, error) {
+				return DownloadAssignedPackage(data, id, assignmentID, updaterToken)
+			})
+		}
 	case r.Method == http.MethodGet && parts[0] == "summary":
 		a.snapshotJSON(w, func(data AppData) interface{} { return Summary(data) })
 	case r.Method == http.MethodGet && parts[0] == "customers":
 		a.snapshotJSON(w, func(data AppData) interface{} { return SortedCustomers(data) })
+	case r.Method == http.MethodPost && len(parts) == 1 && parts[0] == "customers":
+		var req CreateCustomerDeploymentRequest
+		if decodeBody(w, r, &req) {
+			a.updateJSON(w, func(data *AppData) (interface{}, error) { return CreateCustomerDeployment(data, req) })
+		}
 	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "customers" && parts[2] == "renewals":
 		id, ok := parseID(w, parts[1])
 		if ok {
@@ -76,10 +107,35 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 				a.updateJSON(w, func(data *AppData) (interface{}, error) { return RenewCustomer(data, id, req) })
 			}
 		}
-	case r.Method == http.MethodGet && parts[0] == "renewals":
+	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "renewals" && parts[2] == "license-package":
+		id, ok := parseID(w, parts[1])
+		if ok {
+			a.updateJSON(w, func(data *AppData) (interface{}, error) { return DownloadRenewalLicensePackage(data, id) })
+		}
+	case r.Method == http.MethodGet && len(parts) == 1 && parts[0] == "renewals":
 		a.snapshotJSON(w, func(data AppData) interface{} { return data.Renewals })
 	case r.Method == http.MethodGet && parts[0] == "alerts":
 		a.snapshotJSON(w, func(data AppData) interface{} { return data.Alerts })
+	case r.Method == http.MethodPost && len(parts) == 1 && parts[0] == "alerts":
+		var req CreateAlertRequest
+		if decodeBody(w, r, &req) {
+			a.updateJSON(w, func(data *AppData) (interface{}, error) { return CreateOrUpdateAlert(data, req) })
+		}
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "product-ops" && parts[1] == "alerts" && parts[2] == "report":
+		var req CreateAlertRequest
+		if decodeBody(w, r, &req) {
+			if req.UpdaterToken == "" {
+				req.UpdaterToken = r.Header.Get("X-CBMP-Updater-Token")
+			}
+			a.updateJSON(w, func(data *AppData) (interface{}, error) {
+				customerIndex := findCustomerByUpdaterToken(*data, req.UpdaterToken)
+				if customerIndex < 0 {
+					return SystemAlert{}, ErrNotFound
+				}
+				req.CustomerID = data.Customers[customerIndex].ID
+				return CreateOrUpdateAlert(data, req)
+			})
+		}
 	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "alerts" && parts[2] == "ack":
 		id, ok := parseID(w, parts[1])
 		if ok {
@@ -94,7 +150,7 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	case r.Method == http.MethodGet && parts[0] == "update-packages":
-		a.snapshotJSON(w, func(data AppData) interface{} { return data.UpdatePackages })
+		a.snapshotJSON(w, func(data AppData) interface{} { return sanitizeUpdatePackagesForResponse(data.UpdatePackages) })
 	case r.Method == http.MethodPost && len(parts) == 1 && parts[0] == "update-packages":
 		var req CreateUpdatePackageRequest
 		if decodeBody(w, r, &req) {

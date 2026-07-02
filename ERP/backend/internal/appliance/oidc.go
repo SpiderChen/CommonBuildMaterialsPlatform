@@ -178,9 +178,6 @@ func oidcAuthorizationURL(provider OIDCProvider, redirectURI, state, nonce strin
 }
 
 func exchangeOIDCCode(provider OIDCProvider, loginState OIDCLoginState, code string) (map[string]interface{}, error) {
-	if strings.HasPrefix(provider.TokenURL, "mock://") {
-		return nil, fmt.Errorf("演示 SSO 提供商需要提交 id_token")
-	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -416,21 +413,103 @@ func (a *App) systemSSO(w http.ResponseWriter, r *http.Request, session Session,
 		}
 		_ = readJSON(r, &req)
 		var updated OIDCProvider
+		topic := "system.sso.status"
 		err := a.store.Mutate(func(data *AppData) error {
 			for i := range data.OIDCProviders {
 				if data.OIDCProviders[i].ID == id {
-					data.OIDCProviders[i].Status = fallback(req.Status, "enabled")
-					updated = publicOIDCProvider(data.OIDCProviders[i])
+					status := fallback(strings.TrimSpace(req.Status), "enabled")
+					if hasPendingWorkflowForResource(*data, "oidc_provider", id) {
+						updated = publicOIDCProvider(data.OIDCProviders[i])
+						topic = "system.sso.status_requested"
+						return nil
+					}
+					_, instances, err := publishOIDCProviderStatusWorkflow(data, data.OIDCProviders[i], status, session.User.Username)
+					if err != nil {
+						return err
+					}
+					if len(instances) > 0 {
+						updated = publicOIDCProvider(data.OIDCProviders[i])
+						topic = "system.sso.status_requested"
+						addAudit(data, session.User.Username, "request_status", "oidc_provider", id, data.OIDCProviders[i].Code+"/"+status, clientIP(r))
+						return nil
+					}
+					next, err := applyOIDCProviderStatusLocked(data, id, status)
+					if err != nil {
+						return err
+					}
+					updated = publicOIDCProvider(next)
 					addAudit(data, session.User.Username, "status", "oidc_provider", id, updated.Code+"/"+updated.Status, clientIP(r))
 					return nil
 				}
 			}
 			return fmt.Errorf("SSO 提供商不存在")
 		})
-		a.respondMutation(w, err, updated, "system.sso.status")
+		a.respondMutation(w, err, updated, topic)
+		return
+	}
+	if len(parts) == 2 && parts[0] == "providers" && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var deleted OIDCProvider
+		err := a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.OIDCProviders {
+				if item.ID != id {
+					continue
+				}
+				if item.Status == "enabled" {
+					return fmt.Errorf("启用中的 SSO 提供商不能删除，请先停用")
+				}
+				if hasPendingWorkflowForResource(*data, "oidc_provider", id) {
+					return fmt.Errorf("SSO 提供商存在待审批状态变更，不能删除")
+				}
+				deleted = publicOIDCProvider(item)
+				data.OIDCProviders = append(data.OIDCProviders[:i], data.OIDCProviders[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "oidc_provider", id, item.Code, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("SSO 提供商不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("system.sso.provider.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown sso system route")
+}
+
+func publishOIDCProviderStatusWorkflow(data *AppData, item OIDCProvider, targetStatus string, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "oidc_provider.status_change_requested",
+		Source:     "system",
+		Resource:   "oidc_provider",
+		ResourceID: item.ID,
+		ResourceNo: item.Code,
+		Title:      "SSO 提供商状态变更 " + item.Code,
+		Actor:      actor,
+		Reason:     "SSO 提供商状态变更审批",
+		Variables: map[string]string{
+			"targetStatus":  targetStatus,
+			"currentStatus": item.Status,
+			"code":          item.Code,
+			"name":          item.Name,
+			"issuer":        item.Issuer,
+			"companyId":     fmt.Sprintf("%d", item.CompanyID),
+			"siteId":        fmt.Sprintf("%d", item.SiteID),
+		},
+	})
+}
+
+func applyOIDCProviderStatusLocked(data *AppData, id int64, status string) (OIDCProvider, error) {
+	status = fallback(strings.TrimSpace(status), "enabled")
+	for i := range data.OIDCProviders {
+		if data.OIDCProviders[i].ID == id {
+			data.OIDCProviders[i].Status = status
+			return data.OIDCProviders[i], nil
+		}
+	}
+	return OIDCProvider{}, fmt.Errorf("SSO 提供商不存在")
 }
 
 func (a *App) upsertOIDCProvider(w http.ResponseWriter, r *http.Request, session Session) {

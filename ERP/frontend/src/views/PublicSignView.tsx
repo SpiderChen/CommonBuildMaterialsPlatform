@@ -1,8 +1,10 @@
 import { CheckCircle2, ImagePlus } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
-import { StatusChip } from "../components/StatusChip";
+import { type ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { Button, Field, LayoutRegion, LoginForm, Panel, StatusChip, TextAreaInput, TextInput, useMessageBox } from "../components";
 import { api } from "../services/api";
 import type { PublicDeliverySignDetail } from "../services/types";
+import { browserFilePayload } from "../utils/filePayload";
+import { sensitiveActionPrompt } from "../utils/sensitiveActions";
 
 export function PublicSignView({ token }: { token: string }) {
   const [detail, setDetail] = useState<PublicDeliverySignDetail | null>(null);
@@ -10,10 +12,13 @@ export function PublicSignView({ token }: { token: string }) {
   const [phone, setPhone] = useState("");
   const [signedQty, setSignedQty] = useState("");
   const [photoURL, setPhotoURL] = useState("");
-  const [fileName, setFileName] = useState("site-delivery-photo.jpg");
-  const [remark, setRemark] = useState("现场验收无异议");
+  const [photoChecksum, setPhotoChecksum] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [remark, setRemark] = useState("");
   const [error, setError] = useState("");
   const [signedNo, setSignedNo] = useState("");
+  const [geoPosition, setGeoPosition] = useState<{ longitude: number; latitude: number } | null>(null);
+  const { showError, confirmMessage } = useMessageBox();
 
   async function load() {
     const next = await api.publicSignDetail(token);
@@ -26,20 +31,61 @@ export function PublicSignView({ token }: { token: string }) {
     load().catch((err: unknown) => setError(err instanceof Error ? err.message : "签收链接不可用"));
   }, [token]);
 
+  useEffect(() => {
+    if (error) {
+      showError(error, "签收失败");
+    }
+  }, [error, showError]);
+
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => setGeoPosition({
+        longitude: position.coords.longitude,
+        latitude: position.coords.latitude
+      }),
+      () => setGeoPosition(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+    );
+  }, []);
+
+  async function handlePhotoFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const payload = await browserFilePayload(file);
+      setPhotoURL(payload.url);
+      setPhotoChecksum(payload.checksum);
+      setFileName(payload.fileName);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "读取现场照片失败");
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const prompt = sensitiveActionPrompt("public-sign-submit", "提交配送签收");
+    if (prompt) {
+      const confirmed = await confirmMessage({
+        title: prompt.title,
+        message: prompt.message,
+        tone: "warning",
+        confirmLabel: prompt.confirmLabel,
+        confirmVariant: prompt.confirmVariant
+      });
+      if (!confirmed) return;
+    }
     setError("");
     try {
       const signed = await api.publicSign(token, {
         signer,
         phone,
         signedQty: Number(signedQty || detail?.dispatch.planQuantity || 0),
-        longitude: 113.9452,
-        latitude: 22.5358,
+        ...(geoPosition ? { longitude: geoPosition.longitude, latitude: geoPosition.latitude } : {}),
         photo: photoURL,
         signature: signer ? `${signer} 电子签名` : "电子签名",
         remark,
-        attachments: photoURL ? [{ fileName, fileType: "photo", url: photoURL, checksum: "" }] : []
+        attachments: photoURL ? [{ fileName: fileName || "delivery-photo", fileType: "photo", url: photoURL, checksum: photoChecksum }] : []
       });
       setSignedNo(signed.signNo);
     } catch (err) {
@@ -49,19 +95,19 @@ export function PublicSignView({ token }: { token: string }) {
 
   if (signedNo) {
     return (
-      <main className="login-shell">
-        <section className="login-card panel">
+      <LayoutRegion as="main" className="login-shell">
+        <Panel className="login-card">
           <CheckCircle2 size={42} />
           <h1>签收完成</h1>
           <p className="muted">{signedNo}</p>
-        </section>
-      </main>
+        </Panel>
+      </LayoutRegion>
     );
   }
 
   return (
-    <main className="login-shell">
-      <section className="login-card panel">
+    <LayoutRegion as="main" className="login-shell">
+      <Panel className="login-card">
         <p className="eyebrow">工地签收</p>
         <h1>{detail?.dispatch.dispatchNo || "配送签收"}</h1>
         {detail ? (
@@ -74,38 +120,28 @@ export function PublicSignView({ token }: { token: string }) {
             <div><span>状态</span><b><StatusChip value={detail.link.status} /></b></div>
           </div>
         ) : null}
-        <form onSubmit={submit} className="login-form">
-          <label>
-            <span>签收人</span>
-            <input value={signer} onChange={(event) => setSigner(event.target.value)} required />
-          </label>
-          <label>
-            <span>手机号</span>
-            <input value={phone} onChange={(event) => setPhone(event.target.value)} />
-          </label>
-          <label>
-            <span>实收数量</span>
-            <input value={signedQty} onChange={(event) => setSignedQty(event.target.value)} />
-          </label>
-          <label>
-            <span>现场照片 URL</span>
-            <input value={photoURL} onChange={(event) => setPhotoURL(event.target.value)} placeholder="minio://delivery/site-photo.jpg" />
-          </label>
-          <label>
-            <span>附件名</span>
-            <input value={fileName} onChange={(event) => setFileName(event.target.value)} />
-          </label>
-          <label>
-            <span>备注</span>
-            <textarea value={remark} onChange={(event) => setRemark(event.target.value)} />
-          </label>
-          <button className="primary-button" type="submit">
-            <ImagePlus size={16} />
-            提交签收
-          </button>
-          {error ? <p className="error-text">{error}</p> : null}
-        </form>
-      </section>
-    </main>
+        <LoginForm onSubmit={submit}>
+          <Field label="签收人">
+            <TextInput value={signer} onChange={(event) => setSigner(event.target.value)} required />
+          </Field>
+          <Field label="手机号">
+            <TextInput value={phone} onChange={(event) => setPhone(event.target.value)} />
+          </Field>
+          <Field label="实收数量">
+            <TextInput value={signedQty} onChange={(event) => setSignedQty(event.target.value)} required />
+          </Field>
+          <Field label="现场照片">
+            <input type="file" accept="image/*" onChange={handlePhotoFileChange} />
+          </Field>
+          <Field label="附件名">
+            <TextInput value={fileName} onChange={(event) => setFileName(event.target.value)} />
+          </Field>
+          <Field label="备注">
+            <TextAreaInput value={remark} onChange={(event) => setRemark(event.target.value)} />
+          </Field>
+          <Button variant="primary" type="submit" icon={<ImagePlus size={16} />}>提交签收</Button>
+        </LoginForm>
+      </Panel>
+    </LayoutRegion>
   );
 }

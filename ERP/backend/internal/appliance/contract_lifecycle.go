@@ -51,17 +51,25 @@ func (a *App) submitContract(w http.ResponseWriter, r *http.Request, session Ses
 		data.Contracts[index].SubmittedAt = nowString()
 		data.Contracts[index].ChangeReason = fallback(strings.TrimSpace(req.Reason), data.Contracts[index].ChangeReason)
 		item = data.Contracts[index]
-		if _, err := submitApprovalTask(
-			data,
-			"contract_version",
-			"contract",
-			item.ID,
-			contractVersionNo(item),
-			"客户合同版本审批",
-			session.User.Username,
-			fallback(item.ChangeReason, "合同版本提交审批"),
-		); err != nil {
+		_, instances, err := publishWorkflowEvent(data, workflowEventRequest{
+			EventType:  "contract.submitted",
+			Resource:   "contract",
+			ResourceID: item.ID,
+			ResourceNo: contractVersionNo(item),
+			Title:      "客户合同版本审批",
+			Actor:      session.User.Username,
+			Reason:     fallback(item.ChangeReason, "合同版本提交审批"),
+			Variables: map[string]string{
+				"customerId": fmt.Sprintf("%d", item.CustomerID),
+				"projectId":  fmt.Sprintf("%d", item.ProjectID),
+				"version":    fmt.Sprintf("%d", item.Version),
+			},
+		})
+		if err != nil {
 			return err
+		}
+		if len(instances) == 0 {
+			return fmt.Errorf("合同版本工作流未配置")
 		}
 		addAudit(data, session.User.Username, "submit", "contract", item.ID, contractVersionNo(item), clientIP(r))
 		return nil
@@ -100,33 +108,6 @@ func (a *App) reviseContract(w http.ResponseWriter, r *http.Request, session Ses
 		return nil
 	})
 	a.respondMutation(w, err, item, "contract.revised")
-}
-
-func applyContractApprovalResult(data *AppData, task ApprovalTask) error {
-	index := contractIndex(*data, task.ResourceID)
-	if index < 0 {
-		return fmt.Errorf("合同不存在")
-	}
-	if task.Status == "rejected" {
-		data.Contracts[index].Status = "rejected"
-		return nil
-	}
-	if task.Status != "approved" {
-		return nil
-	}
-	contractNo := data.Contracts[index].ContractNo
-	for i := range data.Contracts {
-		if i != index && data.Contracts[i].ContractNo == contractNo && data.Contracts[i].Status == "active" {
-			data.Contracts[i].Status = "superseded"
-		}
-	}
-	data.Contracts[index].Status = "active"
-	data.Contracts[index].ApprovedAt = nowString()
-	data.Contracts[index].ApprovedBy = lastApprovalActor(task)
-	if data.Contracts[index].Version <= 0 {
-		data.Contracts[index].Version = 1
-	}
-	return nil
 }
 
 func normalizeContractDraft(data *AppData, item *Contract) error {
@@ -205,15 +186,6 @@ func contractVersionNo(item Contract) string {
 		version = 1
 	}
 	return fmt.Sprintf("%s-v%d", item.ContractNo, version)
-}
-
-func lastApprovalActor(task ApprovalTask) string {
-	for i := len(task.Actions) - 1; i >= 0; i-- {
-		if task.Actions[i].Actor != "" {
-			return task.Actions[i].Actor
-		}
-	}
-	return task.Applicant
 }
 
 func nonZeroIntAsInt(value, fallbackValue int) int {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -188,6 +189,8 @@ func (a *App) apiHandler(w http.ResponseWriter, r *http.Request) {
 	switch parts[0] {
 	case "me":
 		writeJSON(w, http.StatusOK, map[string]interface{}{"user": publicUser(session.User), "watermark": a.mustSnapshot().License.Watermark})
+	case "account":
+		a.account(w, r, session, parts[1:])
 	case "bootstrap":
 		a.bootstrap(w, r, session)
 	case "dashboard":
@@ -234,8 +237,6 @@ func (a *App) apiHandler(w http.ResponseWriter, r *http.Request) {
 		a.reports(w, r, session)
 	case "system":
 		a.system(w, r, session, parts[1:])
-	case "simulate":
-		a.simulate(w, r, session, parts[1:])
 	default:
 		writeError(w, http.StatusNotFound, "unknown api")
 	}
@@ -519,20 +520,27 @@ func (a *App) bootstrap(w http.ResponseWriter, r *http.Request, session Session)
 	}
 	data.Companies = publicCompanies(data.Companies)
 	for i := range data.Roles {
-		if data.Roles[i].DataScope == "tenant" {
-			data.Roles[i].DataScope = "platform"
-		}
+		data.Roles[i].DataScope = normalizeDataScope(data.Roles[i].DataScope)
 	}
 	data.CustomerComplaints = complaintsWithSLAStatus(data.CustomerComplaints, time.Now())
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"user":                   publicUser(session.User),
 		"license":                data.License,
+		"groupProfile":           data.GroupProfile,
 		"modules":                data.Modules,
+		"dictionaries":           activeDataDictionaries(data.DataDictionaries),
+		"menuPermissions":        menuPermissionMarks(),
+		"menuLabels":             menuLabelsSnapshot(data.MenuLabels),
 		"roles":                  data.Roles,
 		"companies":              data.Companies,
 		"departments":            data.Departments,
 		"sites":                  data.Sites,
-		"plants":                 data.Plants,
+		"plants":                 plantsWithGatewayStatus(data),
+		"plantBufferLocations":   data.PlantBufferLocations,
+		"plantBufferFlows":       data.PlantBufferFlows,
+		"stockYards":             data.StockYards,
+		"stockYardPiles":         data.StockYardPiles,
+		"stockYardFlows":         data.StockYardFlows,
 		"customers":              data.Customers,
 		"customerContacts":       data.CustomerContacts,
 		"customerBlacklists":     data.CustomerBlacklists,
@@ -545,12 +553,14 @@ func (a *App) bootstrap(w http.ResponseWriter, r *http.Request, session Session)
 		"materials":              data.Materials,
 		"carriers":               data.Carriers,
 		"vehicles":               data.Vehicles,
+		"vehicleDevices":         data.VehicleDevices,
 		"drivers":                data.Drivers,
 		"contracts":              data.Contracts,
 		"contractAttachments":    data.ContractAttachments,
 		"dispatchSchedules":      data.DispatchSchedules,
 		"productionPlans":        data.ProductionPlans,
 		"mixDesigns":             data.MixDesigns,
+		"mixDesignPlantProfiles": data.MixDesignPlantProfiles,
 		"mixDesignTrialRuns":     data.MixDesignTrialRuns,
 		"productionTasks":        data.ProductionTasks,
 		"productionBatches":      data.ProductionBatches,
@@ -564,6 +574,16 @@ func (a *App) bootstrap(w http.ResponseWriter, r *http.Request, session Session)
 		"qualityExceptions":      data.QualityExceptions,
 		"inventory":              data.Inventory,
 	})
+}
+
+func activeDataDictionaries(items []DataDictionary) []DataDictionary {
+	out := make([]DataDictionary, 0, len(items))
+	for _, item := range items {
+		if item.Status == "" || item.Status == "active" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (a *App) dashboard(w http.ResponseWriter, r *http.Request, session Session) {
@@ -636,6 +656,7 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request, session Session)
 		},
 		"siteProduction": siteProduction,
 		"customerDebt":   customerDebt,
+		"organization":   buildOrganizationOverview(data).Metrics,
 		"recentOrders":   lastOrders(data.Orders, 8),
 		"alarms":         data.VehicleAlarms,
 		"operating":      reports.Operating,
@@ -718,6 +739,8 @@ func (a *App) master(w http.ResponseWriter, r *http.Request, session Session, pa
 			writeJSON(w, http.StatusOK, data.TaxRates)
 		case "vehicles":
 			writeJSON(w, http.StatusOK, data.Vehicles)
+		case "vehicle-devices":
+			writeJSON(w, http.StatusOK, data.VehicleDevices)
 		case "drivers":
 			writeJSON(w, http.StatusOK, data.Drivers)
 		case "materials":
@@ -726,6 +749,18 @@ func (a *App) master(w http.ResponseWriter, r *http.Request, session Session, pa
 			writeJSON(w, http.StatusOK, data.Inventory)
 		case "sites":
 			writeJSON(w, http.StatusOK, data.Sites)
+		case "plants":
+			writeJSON(w, http.StatusOK, plantsWithGatewayStatus(data))
+		case "plant-buffer-locations":
+			writeJSON(w, http.StatusOK, data.PlantBufferLocations)
+		case "plant-buffer-flows":
+			writeJSON(w, http.StatusOK, data.PlantBufferFlows)
+		case "stock-yards":
+			writeJSON(w, http.StatusOK, data.StockYards)
+		case "stock-yard-piles":
+			writeJSON(w, http.StatusOK, data.StockYardPiles)
+		case "stock-yard-flows":
+			writeJSON(w, http.StatusOK, data.StockYardFlows)
 		case "carriers":
 			writeJSON(w, http.StatusOK, data.Carriers)
 		default:
@@ -772,6 +807,14 @@ func (a *App) master(w http.ResponseWriter, r *http.Request, session Session, pa
 		a.createDriver(w, r, session)
 	case "sites":
 		a.createSite(w, r, session)
+	case "plants":
+		a.createPlant(w, r, session)
+	case "plant-buffer-locations":
+		a.createPlantBufferLocation(w, r, session)
+	case "stock-yards":
+		a.createStockYard(w, r, session)
+	case "stock-yard-piles":
+		a.createStockYardPile(w, r, session)
 	case "inventory":
 		a.createInventoryItem(w, r, session)
 	case "carriers":
@@ -787,7 +830,15 @@ func (a *App) master(w http.ResponseWriter, r *http.Request, session Session, pa
 			return
 		}
 		err := a.store.Mutate(func(data *AppData) error {
+			var err error
+			item.SiteID, err = writableSiteID(*data, session.User, item.SiteID)
+			if err != nil {
+				return err
+			}
 			item.ID = nextID(data, "vehicle")
+			if item.InternalNo == "" {
+				item.InternalNo = fmt.Sprintf("V%03d", item.ID)
+			}
 			if item.Status == "" {
 				item.Status = "active"
 			}
@@ -802,6 +853,8 @@ func (a *App) master(w http.ResponseWriter, r *http.Request, session Session, pa
 			return nil
 		})
 		a.respondMutation(w, err, item, "master.vehicle.created")
+	case "vehicle-devices":
+		a.createVehicleDevice(w, r, session)
 	default:
 		writeError(w, http.StatusNotFound, "unknown master resource")
 	}
@@ -888,7 +941,12 @@ func (a *App) createOrder(w http.ResponseWriter, r *http.Request, session Sessio
 		return
 	}
 	err := a.store.Mutate(func(data *AppData) error {
-		customer, ok := findCustomer(*data, item.CustomerID)
+		var err error
+		item.SiteID, err = writableSiteID(*data, session.User, item.SiteID)
+		if err != nil {
+			return err
+		}
+		customer, ok := scopedCustomer(*data, session.User, item.CustomerID)
 		if !ok {
 			return fmt.Errorf("客户不存在")
 		}
@@ -896,9 +954,12 @@ func (a *App) createOrder(w http.ResponseWriter, r *http.Request, session Sessio
 			addAudit(data, session.User.Username, "block", "sales_order", customer.ID, risk.Reason, clientIP(r))
 			return fmt.Errorf("客户 %s 已被风控停供：%s", customer.Name, risk.Reason)
 		}
-		project, ok := findProject(*data, item.ProjectID)
+		project, ok := scopedProject(*data, session.User, item.ProjectID)
 		if !ok {
 			return fmt.Errorf("项目不存在")
+		}
+		if project.CustomerID != customer.ID {
+			return fmt.Errorf("项目不属于当前客户")
 		}
 		riskFlags, riskReasons, err := prepareSalesOrderLines(data, &item, customer, project)
 		if err != nil {
@@ -922,23 +983,28 @@ func (a *App) createOrder(w http.ResponseWriter, r *http.Request, session Sessio
 		}
 		data.Orders = append(data.Orders, item)
 		if len(riskFlags) > 0 {
-			flowCode := "order_credit_risk"
 			title := "销售订单风险审批"
 			if strings.Contains(item.RiskFlag, "price_below_floor") && !strings.Contains(item.RiskFlag, "credit_limit") {
-				flowCode = "price_below_floor"
 				title = "低于底价销售订单审批"
 			}
-			if _, err := submitApprovalTask(
-				data,
-				flowCode,
-				"sales_order",
-				item.ID,
-				item.OrderNo,
-				title,
-				session.User.Username,
-				strings.Join(riskReasons, "；"),
-			); err != nil {
+			_, instances, err := publishWorkflowEvent(data, workflowEventRequest{
+				EventType:  "sales_order.risk_detected",
+				Resource:   "sales_order",
+				ResourceID: item.ID,
+				ResourceNo: item.OrderNo,
+				Title:      title,
+				Actor:      session.User.Username,
+				Reason:     strings.Join(riskReasons, "；"),
+				Variables: map[string]string{
+					"riskFlags":   item.RiskFlag,
+					"riskReasons": strings.Join(riskReasons, "；"),
+				},
+			})
+			if err != nil {
 				return err
+			}
+			if len(instances) == 0 {
+				return fmt.Errorf("销售订单风险工作流未配置")
 			}
 		}
 		addAudit(data, session.User.Username, "create", "sales_order", item.ID, item.OrderNo, clientIP(r))
@@ -1264,10 +1330,10 @@ func (a *App) reprintTicket(w http.ResponseWriter, r *http.Request, session Sess
 				continue
 			}
 			if !userCanAccessTicket(*data, session.User, data.ScaleTickets[i]) {
-				return fmt.Errorf("无权操作该票据")
+				return fmt.Errorf("无权操作该过磅记录")
 			}
 			if data.ScaleTickets[i].Status != "valid" {
-				return fmt.Errorf("非有效票据不能补打")
+				return fmt.Errorf("非有效过磅记录不能补打")
 			}
 			data.ScaleTickets[i].PrintCount++
 			logItem = TicketPrintLog{
@@ -1280,7 +1346,7 @@ func (a *App) reprintTicket(w http.ResponseWriter, r *http.Request, session Sess
 			addAudit(data, session.User.Username, "reprint", "scale_ticket", id, data.ScaleTickets[i].TicketNo, clientIP(r))
 			return nil
 		}
-		return fmt.Errorf("票据不存在")
+		return fmt.Errorf("过磅记录不存在")
 	})
 	a.respondMutation(w, err, logItem, "ticket.reprinted")
 }
@@ -1310,17 +1376,17 @@ func (a *App) requestVoidTicket(w http.ResponseWriter, r *http.Request, session 
 			}
 		}
 		if !found {
-			return fmt.Errorf("票据不存在")
+			return fmt.Errorf("过磅记录不存在")
 		}
 		if !userCanAccessTicket(*data, session.User, ticket) {
-			return fmt.Errorf("无权操作该票据")
+			return fmt.Errorf("无权操作该过磅记录")
 		}
 		if ticket.Status != "valid" {
-			return fmt.Errorf("非有效票据不能申请作废")
+			return fmt.Errorf("非有效过磅记录不能申请作废")
 		}
 		for _, item := range data.TicketVoidLogs {
 			if item.TicketID == id && item.Status == "pending" {
-				return fmt.Errorf("该票据已有待审批作废申请")
+				return fmt.Errorf("该过磅记录已有待审批作废申请")
 			}
 		}
 		logItem = TicketVoidLog{
@@ -1331,6 +1397,9 @@ func (a *App) requestVoidTicket(w http.ResponseWriter, r *http.Request, session 
 			CreatedAt: nowString(),
 		}
 		data.TicketVoidLogs = append(data.TicketVoidLogs, logItem)
+		if _, _, err := publishTicketVoidWorkflow(data, logItem, ticket, session.User.Username); err != nil {
+			return err
+		}
 		addAudit(data, session.User.Username, "request_void", "scale_ticket", id, ticket.TicketNo, clientIP(r))
 		return nil
 	})
@@ -1356,10 +1425,10 @@ func (a *App) approveVoidTicket(w http.ResponseWriter, r *http.Request, session 
 			}
 		}
 		if ticketIndex < 0 {
-			return fmt.Errorf("票据不存在")
+			return fmt.Errorf("过磅记录不存在")
 		}
 		if !userCanAccessTicket(*data, session.User, data.ScaleTickets[ticketIndex]) {
-			return fmt.Errorf("无权操作该票据")
+			return fmt.Errorf("无权操作该过磅记录")
 		}
 		voidIndex := -1
 		for i := range data.TicketVoidLogs {
@@ -1371,25 +1440,111 @@ func (a *App) approveVoidTicket(w http.ResponseWriter, r *http.Request, session 
 		if voidIndex < 0 {
 			return fmt.Errorf("没有待审批作废申请")
 		}
-		data.TicketVoidLogs[voidIndex].ApprovedBy = session.User.Username
+		if hasPendingWorkflowForResource(*data, "ticket_void", data.TicketVoidLogs[voidIndex].ID) {
+			return fmt.Errorf("过磅记录作废正在工作流审批中，请在工作流中处理")
+		}
+		updated, applyErr := applyTicketVoidDecisionLocked(data, data.TicketVoidLogs[voidIndex].ID, req.Approved, session.User.Username)
+		if applyErr != nil {
+			return applyErr
+		}
+		logItem = updated
 		if req.Approved {
-			data.TicketVoidLogs[voidIndex].Status = "approved"
-			data.ScaleTickets[ticketIndex].Status = "void"
-			data.ScaleTickets[ticketIndex].SettlementStatus = "void"
-			data.ScaleTickets[ticketIndex].SignStatus = "void"
 			topic = "ticket.void.approved"
 			addAudit(data, session.User.Username, "approve_void", "scale_ticket", id, data.ScaleTickets[ticketIndex].TicketNo, clientIP(r))
 		} else {
-			data.TicketVoidLogs[voidIndex].Status = "rejected"
 			addAudit(data, session.User.Username, "reject_void", "scale_ticket", id, data.ScaleTickets[ticketIndex].TicketNo, clientIP(r))
 		}
-		logItem = data.TicketVoidLogs[voidIndex]
 		return nil
 	})
 	a.respondMutation(w, err, logItem, topic)
 }
 
+func publishTicketVoidWorkflow(data *AppData, logItem TicketVoidLog, ticket ScaleTicket, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "ticket_void.requested",
+		Source:     "weighbridge",
+		EventKey:   "ticket_void:" + strconv.FormatInt(logItem.ID, 10),
+		Resource:   "ticket_void",
+		ResourceID: logItem.ID,
+		ResourceNo: ticket.TicketNo,
+		Title:      "磅单作废 " + ticket.TicketNo,
+		Actor:      actor,
+		Reason:     logItem.Reason,
+		Variables: map[string]string{
+			"ticketId":   strconv.FormatInt(ticket.ID, 10),
+			"ticketNo":   ticket.TicketNo,
+			"ticketType": ticket.TicketType,
+			"siteId":     strconv.FormatInt(ticket.SiteID, 10),
+			"plateNo":    ticket.PlateNo,
+		},
+	})
+}
+
+func applyTicketVoidDecisionLocked(data *AppData, voidLogID int64, approved bool, actor string) (TicketVoidLog, error) {
+	voidIndex := -1
+	for i := range data.TicketVoidLogs {
+		if data.TicketVoidLogs[i].ID == voidLogID {
+			voidIndex = i
+			break
+		}
+	}
+	if voidIndex < 0 {
+		return TicketVoidLog{}, fmt.Errorf("过磅记录作废申请不存在")
+	}
+	if data.TicketVoidLogs[voidIndex].Status != "pending" {
+		return data.TicketVoidLogs[voidIndex], nil
+	}
+	ticketIndex := -1
+	for i := range data.ScaleTickets {
+		if data.ScaleTickets[i].ID == data.TicketVoidLogs[voidIndex].TicketID {
+			ticketIndex = i
+			break
+		}
+	}
+	if ticketIndex < 0 {
+		return TicketVoidLog{}, fmt.Errorf("过磅记录不存在")
+	}
+	data.TicketVoidLogs[voidIndex].ApprovedBy = actor
+	if approved {
+		data.TicketVoidLogs[voidIndex].Status = "approved"
+		data.ScaleTickets[ticketIndex].Status = "void"
+		data.ScaleTickets[ticketIndex].SettlementStatus = "void"
+		data.ScaleTickets[ticketIndex].SignStatus = "void"
+	} else {
+		data.TicketVoidLogs[voidIndex].Status = "rejected"
+	}
+	return data.TicketVoidLogs[voidIndex], nil
+}
+
 func (a *App) delivery(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
+	if len(parts) == 1 && parts[0] == "notes" {
+		if r.Method == http.MethodGet {
+			a.listDeliveryNotes(w, r, session)
+			return
+		}
+		if r.Method == http.MethodPost {
+			a.createDeliveryNote(w, r, session)
+			return
+		}
+	}
+	if noteID, ok := parseDeliveryNoteID(parts); ok {
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			a.getDeliveryNote(w, r, session, noteID)
+			return
+		}
+		if len(parts) == 3 && parts[2] == "status" && r.Method == http.MethodPost {
+			a.updateDeliveryNoteStatus(w, r, session, noteID)
+			return
+		}
+		if len(parts) == 3 && parts[2] == "reprint" && r.Method == http.MethodPost {
+			a.reprintDeliveryNote(w, r, session, noteID)
+			return
+		}
+		if len(parts) == 3 && parts[2] == "sign-link" && r.Method == http.MethodPost {
+			a.createDeliveryNoteSignLink(w, r, session, noteID)
+			return
+		}
+	}
 	if len(parts) == 1 && parts[0] == "sign" {
 		if r.Method == http.MethodGet {
 			writeJSON(w, http.StatusOK, scopedData(a.mustSnapshot(), session.User).DeliverySigns)
@@ -1447,10 +1602,28 @@ func (a *App) statements(w http.ResponseWriter, r *http.Request, session Session
 		err := a.store.Mutate(func(data *AppData) error {
 			for i := range data.Statements {
 				if data.Statements[i].ID == id {
-					data.Statements[i].Status = "confirmed"
-					data.Statements[i].ConfirmedBy = session.User.DisplayName
-					data.Statements[i].ConfirmedAt = nowString()
-					updated = data.Statements[i]
+					if data.Statements[i].Status == "confirmed" {
+						updated = data.Statements[i]
+						return nil
+					}
+					if hasPendingWorkflowForResource(*data, "statement", id) {
+						return fmt.Errorf("客户对账单正在工作流确认中，请在工作流中处理")
+					}
+					event, instances, err := publishCustomerStatementWorkflow(data, data.Statements[i], session.User.Username)
+					if err != nil {
+						return err
+					}
+					if event.Status == "handled" || len(instances) > 0 {
+						data.Statements[i].Status = "pending_approval"
+						updated = data.Statements[i]
+						addAudit(data, session.User.Username, "request_confirm", "customer_statement", id, updated.StatementNo, clientIP(r))
+						return nil
+					}
+					next, err := confirmStatementLocked(data, id, session.User.DisplayName)
+					if err != nil {
+						return err
+					}
+					updated = next
 					addAudit(data, session.User.Username, "confirm", "customer_statement", id, updated.StatementNo, clientIP(r))
 					return nil
 				}
@@ -1461,6 +1634,40 @@ func (a *App) statements(w http.ResponseWriter, r *http.Request, session Session
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown statement route")
+}
+
+func publishCustomerStatementWorkflow(data *AppData, item Statement, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "statement.confirm_requested",
+		Source:     "finance",
+		EventKey:   "statement_confirm:" + item.StatementNo,
+		Resource:   "statement",
+		ResourceID: item.ID,
+		ResourceNo: item.StatementNo,
+		Title:      "客户对账单确认 " + item.StatementNo,
+		Actor:      actor,
+		Reason:     "客户对账确认",
+		Variables: map[string]string{
+			"customerId":  strconv.FormatInt(item.CustomerID, 10),
+			"projectId":   strconv.FormatInt(item.ProjectID, 10),
+			"period":      item.Period,
+			"totalQty":    fmt.Sprintf("%.2f", item.TotalQty),
+			"totalAmount": fmt.Sprintf("%.2f", item.TotalAmount),
+		},
+	})
+}
+
+func confirmStatementLocked(data *AppData, id int64, actor string) (Statement, error) {
+	for i := range data.Statements {
+		if data.Statements[i].ID != id {
+			continue
+		}
+		data.Statements[i].Status = "confirmed"
+		data.Statements[i].ConfirmedBy = actor
+		data.Statements[i].ConfirmedAt = nowString()
+		return data.Statements[i], nil
+	}
+	return Statement{}, fmt.Errorf("对账单不存在")
 }
 
 func (a *App) vehicle(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
@@ -1526,12 +1733,9 @@ func (a *App) reportLocation(w http.ResponseWriter, r *http.Request, session Ses
 		writeError(w, http.StatusBadRequest, "invalid location")
 		return
 	}
-	if strings.HasPrefix(session.User.Username, "device:") {
-		deviceNo := strings.TrimPrefix(session.User.Username, "device:")
-		if req.DeviceNo != "" && req.DeviceNo != deviceNo {
-			writeError(w, http.StatusForbidden, "device key does not match payload")
-			return
-		}
+	if boundDeviceSessionPayloadMismatch(a.mustSnapshot(), session, req.DeviceNo) {
+		writeError(w, http.StatusForbidden, "device key does not match payload")
+		return
 	}
 	event, latest, err := a.recordLocationReport(r, session, req)
 	if err == nil {
@@ -1541,17 +1745,43 @@ func (a *App) reportLocation(w http.ResponseWriter, r *http.Request, session Ses
 	a.respondMutation(w, err, event, "vehicle.location.update")
 }
 
-func (a *App) recordLocationReport(r *http.Request, session Session, req locationReportPayload) (VehicleLocationEvent, VehicleLatestLocation, error) {
-	if strings.HasPrefix(session.User.Username, "device:") {
-		deviceNo := strings.TrimPrefix(session.User.Username, "device:")
-		if req.DeviceNo != "" && req.DeviceNo != deviceNo {
-			return VehicleLocationEvent{}, VehicleLatestLocation{}, fmt.Errorf("device key does not match payload")
-		}
-		req.DeviceNo = deviceNo
+func boundDeviceSessionPayloadMismatch(data AppData, session Session, payloadDeviceNo string) bool {
+	if !strings.HasPrefix(session.User.Username, "device:") {
+		return false
 	}
+	sessionDeviceNo := strings.TrimPrefix(session.User.Username, "device:")
+	if payloadDeviceNo == "" || payloadDeviceNo == sessionDeviceNo {
+		return false
+	}
+	_, bound := findVehicleByDeviceNo(data, sessionDeviceNo)
+	return bound
+}
+
+func normalizeLocationReportDevice(data AppData, session Session, req *locationReportPayload) error {
+	if !strings.HasPrefix(session.User.Username, "device:") {
+		return nil
+	}
+	sessionDeviceNo := strings.TrimPrefix(session.User.Username, "device:")
+	if req.DeviceNo == "" {
+		req.DeviceNo = sessionDeviceNo
+		return nil
+	}
+	if req.DeviceNo == sessionDeviceNo {
+		return nil
+	}
+	if boundDeviceSessionPayloadMismatch(data, session, req.DeviceNo) {
+		return fmt.Errorf("device key does not match payload")
+	}
+	return nil
+}
+
+func (a *App) recordLocationReport(r *http.Request, session Session, req locationReportPayload) (VehicleLocationEvent, VehicleLatestLocation, error) {
 	var event VehicleLocationEvent
 	var latest VehicleLatestLocation
 	err := a.store.Mutate(func(data *AppData) error {
+		if err := normalizeLocationReportDevice(*data, session, &req); err != nil {
+			return err
+		}
 		if req.PlateNo == "" && req.DeviceNo != "" {
 			if vehicle, ok := findVehicleByDeviceNo(*data, req.DeviceNo); ok {
 				req.PlateNo = vehicle.PlateNo
@@ -1591,6 +1821,14 @@ func (a *App) recordLocationReport(r *http.Request, session Session, req locatio
 			CurrentOrderID: orderID, CurrentProjectID: projectID, CurrentSiteID: vehicle.SiteID, CurrentCustomerID: customerID,
 		}
 		upsertLatestLocation(data, latest)
+		for i := range data.VehicleDevices {
+			if data.VehicleDevices[i].DeviceNo == req.DeviceNo || data.VehicleDevices[i].VehicleID == vehicle.ID {
+				data.VehicleDevices[i].VehicleID = vehicle.ID
+				data.VehicleDevices[i].DeviceNo = fallback(data.VehicleDevices[i].DeviceNo, req.DeviceNo)
+				data.VehicleDevices[i].Status = "online"
+				data.VehicleDevices[i].LastSeenAt = event.ReceiveTime
+			}
+		}
 		for i := range data.Vehicles {
 			if data.Vehicles[i].ID == vehicle.ID {
 				data.Vehicles[i].OnlineStatus = "online"
@@ -1843,6 +2081,10 @@ func (a *App) system(w http.ResponseWriter, r *http.Request, session Session, pa
 		writeJSON(w, http.StatusOK, data.AuditLogs)
 	case "org":
 		a.systemOrg(w, r, session, parts[1:])
+	case "users":
+		a.systemUsers(w, r, session, parts[1:])
+	case "roles":
+		a.systemRoles(w, r, session, parts[1:])
 	case "mfa":
 		a.systemMFA(w, r, session, parts[1:])
 	case "sso":
@@ -1853,24 +2095,14 @@ func (a *App) system(w http.ResponseWriter, r *http.Request, session Session, pa
 		a.systemFieldPolicies(w, r, session, parts[1:])
 	case "approval-flows":
 		a.systemApprovalFlows(w, r, session, parts[1:])
+	case "workflows":
+		a.systemWorkflows(w, r, session, parts[1:])
 	case "dictionaries":
 		a.systemDictionaries(w, r, session, parts[1:])
+	case "menu-labels":
+		a.systemMenuLabels(w, r, session, parts[1:])
 	case "security":
-		securityData := scopedData(data, session.User)
-		sessionPolicy := buildSessionPolicy(securityData)
-		activeSessions := a.activeSessionSummaries(sessionPolicy)
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"policies":          securityData.SecurityPolicies,
-			"fieldPolicies":     securityData.FieldPolicies,
-			"deviceCredentials": publicDeviceCredentials(securityData.DeviceCredentials),
-			"users":             publicUsers(securityData.Users),
-			"ssoProviders":      publicOIDCProviders(securityData.OIDCProviders),
-			"scimProviders":     publicSCIMProviders(securityData.SCIMProviders),
-			"scimEvents":        securityData.SCIMEvents,
-			"sessionPolicy":     sessionPolicy,
-			"sessions":          activeSessions,
-			"report":            buildSecurityReport(securityData, activeSessions, sessionPolicy),
-		})
+		a.systemSecurity(w, r, session, parts[1:])
 	case "runtime":
 		writeJSON(w, http.StatusOK, a.runtimeStatus())
 	case "map-config":
@@ -1888,6 +2120,722 @@ func (a *App) system(w http.ResponseWriter, r *http.Request, session Session, pa
 	}
 }
 
+type deviceCredentialPayload struct {
+	ID        int64    `json:"id"`
+	DeviceNo  string   `json:"deviceNo"`
+	DeviceKey string   `json:"deviceKey"`
+	Scopes    []string `json:"scopes"`
+	Status    string   `json:"status"`
+}
+
+func (a *App) systemSecurity(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
+	if len(parts) == 0 && r.Method == http.MethodGet {
+		securityData := scopedData(a.mustSnapshot(), session.User)
+		sessionPolicy := buildSessionPolicy(securityData)
+		activeSessions := a.activeSessionSummaries(sessionPolicy)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"policies":          securityData.SecurityPolicies,
+			"fieldPolicies":     securityData.FieldPolicies,
+			"deviceCredentials": publicDeviceCredentials(securityData.DeviceCredentials),
+			"users":             publicUsers(securityData.Users),
+			"ssoProviders":      publicOIDCProviders(securityData.OIDCProviders),
+			"scimProviders":     publicSCIMProviders(securityData.SCIMProviders),
+			"scimEvents":        securityData.SCIMEvents,
+			"sessionPolicy":     sessionPolicy,
+			"sessions":          activeSessions,
+			"report":            buildSecurityReport(securityData, activeSessions, sessionPolicy),
+		})
+		return
+	}
+	if len(parts) == 1 && parts[0] == "policies" && r.Method == http.MethodPost {
+		var req SecurityPolicy
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid security policy payload")
+			return
+		}
+		var saved SecurityPolicy
+		err := a.store.Mutate(func(data *AppData) error {
+			policy, err := normalizeSecurityPolicy(req)
+			if err != nil {
+				return err
+			}
+			if req.ID > 0 {
+				for i := range data.SecurityPolicies {
+					if data.SecurityPolicies[i].ID != req.ID {
+						continue
+					}
+					for j := range data.SecurityPolicies {
+						if j != i && data.SecurityPolicies[j].Type == policy.Type {
+							return fmt.Errorf("安全策略类型已存在")
+						}
+					}
+					data.SecurityPolicies[i] = policy
+					saved = policy
+					addAudit(data, session.User.Username, "update", "security_policy", policy.ID, policy.Type, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("安全策略不存在")
+			}
+			for _, existing := range data.SecurityPolicies {
+				if existing.Type == policy.Type {
+					return fmt.Errorf("安全策略类型已存在")
+				}
+			}
+			policy.ID = nextID(data, "securityPolicy")
+			data.SecurityPolicies = append(data.SecurityPolicies, policy)
+			saved = policy
+			addAudit(data, session.User.Username, "create", "security_policy", policy.ID, policy.Type, clientIP(r))
+			return nil
+		})
+		a.respondMutation(w, err, saved, "system.security_policy.saved")
+		return
+	}
+	if len(parts) == 3 && parts[0] == "policies" && parts[2] == "toggle" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = readJSON(r, &req)
+		var saved SecurityPolicy
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.SecurityPolicies {
+				if data.SecurityPolicies[i].ID != id {
+					continue
+				}
+				data.SecurityPolicies[i].Enabled = req.Enabled
+				saved = data.SecurityPolicies[i]
+				addAudit(data, session.User.Username, "toggle", "security_policy", id, saved.Type, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("安全策略不存在")
+		})
+		a.respondMutation(w, err, saved, "system.security_policy.updated")
+		return
+	}
+	if len(parts) == 2 && parts[0] == "policies" && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var deleted SecurityPolicy
+		err := a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.SecurityPolicies {
+				if item.ID != id {
+					continue
+				}
+				if item.Enabled {
+					return fmt.Errorf("启用中的安全策略不能删除，请先停用")
+				}
+				deleted = item
+				data.SecurityPolicies = append(data.SecurityPolicies[:i], data.SecurityPolicies[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "security_policy", id, item.Type, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("安全策略不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("system.security_policy.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "device-credentials" && r.Method == http.MethodPost {
+		var req deviceCredentialPayload
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid device credential payload")
+			return
+		}
+		var saved DeviceCredential
+		err := a.store.Mutate(func(data *AppData) error {
+			credential, err := normalizeDeviceCredential(req)
+			if err != nil {
+				return err
+			}
+			if req.ID > 0 {
+				for i := range data.DeviceCredentials {
+					if data.DeviceCredentials[i].ID != req.ID {
+						continue
+					}
+					for j := range data.DeviceCredentials {
+						if j != i && data.DeviceCredentials[j].DeviceNo == credential.DeviceNo {
+							return fmt.Errorf("设备号已存在")
+						}
+					}
+					if credential.KeyHash == "" {
+						credential.KeyHash = data.DeviceCredentials[i].KeyHash
+					}
+					credential.LastUsedAt = data.DeviceCredentials[i].LastUsedAt
+					data.DeviceCredentials[i] = credential
+					saved = publicDeviceCredentials([]DeviceCredential{credential})[0]
+					addAudit(data, session.User.Username, "update", "device_credential", credential.ID, credential.DeviceNo, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("设备凭证不存在")
+			}
+			for _, existing := range data.DeviceCredentials {
+				if existing.DeviceNo == credential.DeviceNo {
+					return fmt.Errorf("设备号已存在")
+				}
+			}
+			if credential.KeyHash == "" {
+				return fmt.Errorf("新建设备凭证必须设置设备密钥")
+			}
+			credential.ID = nextID(data, "deviceCredential")
+			data.DeviceCredentials = append(data.DeviceCredentials, credential)
+			saved = publicDeviceCredentials([]DeviceCredential{credential})[0]
+			addAudit(data, session.User.Username, "create", "device_credential", credential.ID, credential.DeviceNo, clientIP(r))
+			return nil
+		})
+		a.respondMutation(w, err, saved, "system.device_credential.saved")
+		return
+	}
+	if len(parts) == 3 && parts[0] == "device-credentials" && parts[2] == "status" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var req struct {
+			Status string `json:"status"`
+		}
+		_ = readJSON(r, &req)
+		var saved DeviceCredential
+		err := a.store.Mutate(func(data *AppData) error {
+			status := fallback(strings.TrimSpace(req.Status), "active")
+			for i := range data.DeviceCredentials {
+				if data.DeviceCredentials[i].ID != id {
+					continue
+				}
+				data.DeviceCredentials[i].Status = status
+				saved = publicDeviceCredentials([]DeviceCredential{data.DeviceCredentials[i]})[0]
+				addAudit(data, session.User.Username, "status", "device_credential", id, data.DeviceCredentials[i].DeviceNo+"/"+status, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("设备凭证不存在")
+		})
+		a.respondMutation(w, err, saved, "system.device_credential.status")
+		return
+	}
+	if len(parts) == 2 && parts[0] == "device-credentials" && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var deleted DeviceCredential
+		err := a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.DeviceCredentials {
+				if item.ID != id {
+					continue
+				}
+				if item.Status == "active" {
+					return fmt.Errorf("启用中的设备凭证不能删除，请先停用")
+				}
+				deleted = publicDeviceCredentials([]DeviceCredential{item})[0]
+				data.DeviceCredentials = append(data.DeviceCredentials[:i], data.DeviceCredentials[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "device_credential", id, item.DeviceNo, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("设备凭证不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("system.device_credential.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown security route")
+}
+
+func normalizeSecurityPolicy(req SecurityPolicy) (SecurityPolicy, error) {
+	policyType := strings.TrimSpace(req.Type)
+	name := strings.TrimSpace(req.Name)
+	if policyType == "" || name == "" {
+		return SecurityPolicy{}, fmt.Errorf("安全策略名称和类型不能为空")
+	}
+	return SecurityPolicy{
+		ID:      req.ID,
+		Name:    name,
+		Type:    policyType,
+		Value:   strings.TrimSpace(req.Value),
+		Enabled: req.Enabled,
+		Remark:  strings.TrimSpace(req.Remark),
+	}, nil
+}
+
+func normalizeDeviceCredential(req deviceCredentialPayload) (DeviceCredential, error) {
+	deviceNo := strings.TrimSpace(req.DeviceNo)
+	if deviceNo == "" {
+		return DeviceCredential{}, fmt.Errorf("设备号不能为空")
+	}
+	credential := DeviceCredential{
+		ID:       req.ID,
+		DeviceNo: deviceNo,
+		Scopes:   normalizeStringList(req.Scopes),
+		Status:   fallback(strings.TrimSpace(req.Status), "active"),
+	}
+	if len(credential.Scopes) == 0 {
+		return DeviceCredential{}, fmt.Errorf("设备权限范围不能为空")
+	}
+	if key := strings.TrimSpace(req.DeviceKey); key != "" {
+		credential.KeyHash = sha256Hex(key)
+	}
+	return credential, nil
+}
+
+type menuLabelPayload struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+func menuLabelsSnapshot(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels))
+	for key, label := range labels {
+		key = strings.TrimSpace(key)
+		label = strings.TrimSpace(label)
+		if key != "" && label != "" {
+			out[key] = label
+		}
+	}
+	return out
+}
+
+func normalizeMenuLabelPayload(req menuLabelPayload) (string, string, error) {
+	key := strings.TrimSpace(req.Key)
+	label := strings.TrimSpace(req.Label)
+	if key == "" || label == "" {
+		return "", "", fmt.Errorf("菜单标识和显示名称不能为空")
+	}
+	if _, ok := editableMenuLabelKeys()[key]; !ok {
+		return "", "", fmt.Errorf("菜单不存在，不能新增菜单")
+	}
+	if len([]rune(label)) > 32 {
+		return "", "", fmt.Errorf("菜单显示名称不能超过 32 个字符")
+	}
+	return key, label, nil
+}
+
+func normalizeMenuLabelKey(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("菜单标识不能为空")
+	}
+	if _, ok := editableMenuLabelKeys()[key]; !ok {
+		return "", fmt.Errorf("菜单不存在，不能新增菜单")
+	}
+	return key, nil
+}
+
+func (a *App) systemMenuLabels(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
+	if len(parts) == 0 && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, menuLabelsSnapshot(a.mustSnapshot().MenuLabels))
+		return
+	}
+	if len(parts) == 0 && r.Method == http.MethodPost {
+		var req menuLabelPayload
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid menu label payload")
+			return
+		}
+		key, label, err := normalizeMenuLabelPayload(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var saved map[string]string
+		err = a.store.Mutate(func(data *AppData) error {
+			if data.MenuLabels == nil {
+				data.MenuLabels = map[string]string{}
+			}
+			data.MenuLabels[key] = label
+			saved = menuLabelsSnapshot(data.MenuLabels)
+			addAudit(data, session.User.Username, "update", "menu_label", 0, key, clientIP(r))
+			return nil
+		})
+		a.respondMutation(w, err, saved, "system.menu_label.updated")
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		key, err := normalizeMenuLabelKey(parts[0])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var saved map[string]string
+		err = a.store.Mutate(func(data *AppData) error {
+			if data.MenuLabels != nil {
+				delete(data.MenuLabels, key)
+			}
+			saved = menuLabelsSnapshot(data.MenuLabels)
+			addAudit(data, session.User.Username, "reset", "menu_label", 0, key, clientIP(r))
+			return nil
+		})
+		a.respondMutation(w, err, saved, "system.menu_label.reset")
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown menu label route")
+}
+
+type systemUserPayload struct {
+	ID          int64  `json:"id"`
+	CompanyID   int64  `json:"companyId"`
+	SiteID      int64  `json:"siteId"`
+	CustomerID  int64  `json:"customerId"`
+	DriverID    int64  `json:"driverId"`
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	RoleCode    string `json:"roleCode"`
+	Status      string `json:"status"`
+	Password    string `json:"password"`
+}
+
+func (a *App) systemUsers(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
+	if len(parts) == 0 && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, publicUsers(scopedData(a.mustSnapshot(), session.User).Users))
+		return
+	}
+	if len(parts) == 0 && r.Method == http.MethodPost {
+		var req systemUserPayload
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid user payload")
+			return
+		}
+		var saved User
+		err := a.store.Mutate(func(data *AppData) error {
+			user, err := normalizeSystemUser(data, req)
+			if err != nil {
+				return err
+			}
+			if req.ID > 0 {
+				for i := range data.Users {
+					if data.Users[i].ID != req.ID {
+						continue
+					}
+					for j := range data.Users {
+						if j != i && data.Users[j].Username == user.Username {
+							return fmt.Errorf("用户名已存在")
+						}
+					}
+					user.PasswordHash = data.Users[i].PasswordHash
+					user.PasswordSalt = data.Users[i].PasswordSalt
+					user.MFAEnabled = data.Users[i].MFAEnabled
+					user.MFASecret = data.Users[i].MFASecret
+					user.MFALastUsedStep = data.Users[i].MFALastUsedStep
+					if strings.TrimSpace(req.Password) != "" {
+						user.PasswordSalt, user.PasswordHash = makePassword(strings.TrimSpace(req.Password))
+					}
+					data.Users[i] = user
+					saved = publicUser(user)
+					addAudit(data, session.User.Username, "update", "user", user.ID, user.Username, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("用户不存在")
+			}
+			for _, existing := range data.Users {
+				if existing.Username == user.Username {
+					return fmt.Errorf("用户名已存在")
+				}
+			}
+			user.ID = nextID(data, "user")
+			initialPassword := strings.TrimSpace(req.Password)
+			if initialPassword == "" {
+				return fmt.Errorf("新建用户必须设置初始密码")
+			}
+			user.PasswordSalt, user.PasswordHash = makePassword(initialPassword)
+			data.Users = append(data.Users, user)
+			saved = publicUser(user)
+			addAudit(data, session.User.Username, "create", "user", user.ID, user.Username, clientIP(r))
+			return nil
+		})
+		a.respondMutation(w, err, saved, "system.user.saved")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "status" && r.Method == http.MethodPost {
+		id, _ := strconv.ParseInt(parts[0], 10, 64)
+		var req struct {
+			Status string `json:"status"`
+		}
+		_ = readJSON(r, &req)
+		var saved User
+		topic := "system.user.status"
+		err := a.store.Mutate(func(data *AppData) error {
+			status := fallback(strings.TrimSpace(req.Status), "active")
+			for i := range data.Users {
+				if data.Users[i].ID != id {
+					continue
+				}
+				if hasPendingWorkflowForResource(*data, "system_user", id) {
+					saved = publicUser(data.Users[i])
+					topic = "system.user.status_requested"
+					return nil
+				}
+				_, instances, err := publishSystemUserStatusWorkflow(data, data.Users[i], status, session.User.Username)
+				if err != nil {
+					return err
+				}
+				if len(instances) > 0 {
+					saved = publicUser(data.Users[i])
+					topic = "system.user.status_requested"
+					addAudit(data, session.User.Username, "request_status", "user", id, data.Users[i].Username+"/"+status, clientIP(r))
+					return nil
+				}
+				next, err := applySystemUserStatusLocked(data, id, status)
+				if err != nil {
+					return err
+				}
+				saved = publicUser(next)
+				addAudit(data, session.User.Username, "status", "user", id, data.Users[i].Username+"/"+status, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("用户不存在")
+		})
+		a.respondMutation(w, err, saved, topic)
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown user route")
+}
+
+func publishSystemUserStatusWorkflow(data *AppData, item User, targetStatus string, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "system_user.status_change_requested",
+		Source:     "system",
+		Resource:   "system_user",
+		ResourceID: item.ID,
+		ResourceNo: item.Username,
+		Title:      "用户状态变更 " + item.Username,
+		Actor:      actor,
+		Reason:     "用户状态变更审批",
+		Variables: map[string]string{
+			"targetStatus":  targetStatus,
+			"currentStatus": item.Status,
+			"username":      item.Username,
+			"displayName":   item.DisplayName,
+			"roleCode":      item.RoleCode,
+			"companyId":     fmt.Sprintf("%d", item.CompanyID),
+			"siteId":        fmt.Sprintf("%d", item.SiteID),
+			"customerId":    fmt.Sprintf("%d", item.CustomerID),
+			"driverId":      fmt.Sprintf("%d", item.DriverID),
+		},
+	})
+}
+
+func applySystemUserStatusLocked(data *AppData, id int64, status string) (User, error) {
+	status = fallback(strings.TrimSpace(status), "active")
+	for i := range data.Users {
+		if data.Users[i].ID == id {
+			data.Users[i].Status = status
+			return data.Users[i], nil
+		}
+	}
+	return User{}, fmt.Errorf("用户不存在")
+}
+
+func normalizeSystemUser(data *AppData, req systemUserPayload) (User, error) {
+	username := strings.TrimSpace(req.Username)
+	displayName := strings.TrimSpace(req.DisplayName)
+	roleCode := strings.TrimSpace(req.RoleCode)
+	if username == builtinAdminUsername {
+		displayName = builtinSuperAdminRoleName
+		roleCode = builtinSuperAdminRoleCode
+	}
+	if username == "" || displayName == "" || roleCode == "" {
+		return User{}, fmt.Errorf("用户名、姓名和角色不能为空")
+	}
+	if !roleExists(data.Roles, roleCode) {
+		return User{}, fmt.Errorf("角色不存在")
+	}
+	return User{
+		ID:          req.ID,
+		CompanyID:   req.CompanyID,
+		SiteID:      req.SiteID,
+		CustomerID:  req.CustomerID,
+		DriverID:    req.DriverID,
+		Username:    username,
+		DisplayName: displayName,
+		RoleCode:    roleCode,
+		Status:      fallback(strings.TrimSpace(req.Status), "active"),
+	}, nil
+}
+
+func roleExists(roles []Role, code string) bool {
+	for _, role := range roles {
+		if role.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) systemRoles(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
+	if len(parts) == 0 && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, scopedData(a.mustSnapshot(), session.User).Roles)
+		return
+	}
+	if len(parts) == 0 && r.Method == http.MethodPost {
+		var req Role
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid role payload")
+			return
+		}
+		var saved Role
+		err := a.store.Mutate(func(data *AppData) error {
+			role, err := normalizeSystemRole(req)
+			if err != nil {
+				return err
+			}
+			if req.ID > 0 {
+				for i := range data.Roles {
+					if data.Roles[i].ID != req.ID {
+						continue
+					}
+					if data.Roles[i].Code == builtinSuperAdminRoleCode {
+						role = builtinSuperAdminRole(data.Roles[i].ID)
+						data.Roles[i] = role
+						saved = role
+						addAudit(data, session.User.Username, "update", "role", role.ID, role.Code, clientIP(r))
+						return nil
+					}
+					for j := range data.Roles {
+						if j != i && data.Roles[j].Code == role.Code {
+							return fmt.Errorf("角色编码已存在")
+						}
+					}
+					data.Roles[i] = role
+					saved = role
+					addAudit(data, session.User.Username, "update", "role", role.ID, role.Code, clientIP(r))
+					return nil
+				}
+				return fmt.Errorf("角色不存在")
+			}
+			for _, existing := range data.Roles {
+				if existing.Code == role.Code {
+					return fmt.Errorf("角色编码已存在")
+				}
+			}
+			role.ID = nextID(data, "role")
+			data.Roles = append(data.Roles, role)
+			saved = role
+			addAudit(data, session.User.Username, "create", "role", role.ID, role.Code, clientIP(r))
+			return nil
+		})
+		a.respondMutation(w, err, saved, "system.role.saved")
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		id, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil || id <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid role id")
+			return
+		}
+		var deleted Role
+		err = a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.Roles {
+				if item.ID != id {
+					continue
+				}
+				if item.Code == builtinSuperAdminRoleCode {
+					return fmt.Errorf("内置超级管理员角色不能删除")
+				}
+				if reason := systemRoleReferenceReason(*data, item.Code); reason != "" {
+					return errors.New(reason)
+				}
+				deleted = item
+				data.Roles = append(data.Roles[:i], data.Roles[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "role", item.ID, item.Code, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("角色不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("system.role.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown role route")
+}
+
+func normalizeSystemRole(req Role) (Role, error) {
+	code := strings.TrimSpace(req.Code)
+	name := strings.TrimSpace(req.Name)
+	if code == "" || name == "" {
+		return Role{}, fmt.Errorf("角色编码和名称不能为空")
+	}
+	if code == builtinSuperAdminRoleCode {
+		return builtinSuperAdminRole(req.ID), nil
+	}
+	return Role{
+		ID:          req.ID,
+		Code:        code,
+		Name:        name,
+		Permissions: normalizeStringList(req.Permissions),
+		DataScope:   normalizeDataScope(req.DataScope),
+	}, nil
+}
+
+func systemRoleReferenceReason(data AppData, roleCode string) string {
+	roleCode = strings.TrimSpace(roleCode)
+	for _, item := range data.Users {
+		if item.RoleCode == roleCode {
+			return "角色已被用户引用，不能删除"
+		}
+	}
+	for _, item := range data.FieldPolicies {
+		if item.RoleCode == roleCode {
+			return "角色已被字段策略引用，不能删除"
+		}
+	}
+	for _, item := range data.ApprovalFlows {
+		for _, step := range item.Steps {
+			if step.RoleCode == roleCode {
+				return "角色已被审批流引用，不能删除"
+			}
+		}
+	}
+	for _, item := range data.ApprovalTasks {
+		if item.CurrentRole == roleCode {
+			return "角色仍有审批任务，不能删除"
+		}
+	}
+	for _, item := range data.WorkflowDefinitions {
+		for _, step := range item.Steps {
+			if step.RoleCode == roleCode {
+				return "角色已被工作流定义引用，不能删除"
+			}
+		}
+	}
+	for _, item := range data.WorkflowTasks {
+		if item.RoleCode == roleCode {
+			return "角色仍有工作流任务，不能删除"
+		}
+	}
+	for _, item := range data.WorkflowInstances {
+		if item.CurrentRole == roleCode {
+			return "角色仍有工作流实例，不能删除"
+		}
+	}
+	for _, item := range data.OIDCProviders {
+		if item.RoleCode == roleCode {
+			return "角色已被 SSO 提供商引用，不能删除"
+		}
+	}
+	for _, item := range data.SCIMProviders {
+		if item.DefaultRoleCode == roleCode {
+			return "角色已被 SCIM 提供商引用，不能删除"
+		}
+	}
+	return ""
+}
+
+func normalizeStringList(items []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, item := range items {
+		value := strings.TrimSpace(item)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
 func (a *App) systemFieldPolicies(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
 	if len(parts) == 0 && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, a.mustSnapshot().FieldPolicies)
@@ -1900,17 +2848,72 @@ func (a *App) systemFieldPolicies(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 		err := a.store.Mutate(func(data *AppData) error {
-			if item.RoleCode == "" || item.Resource == "" || item.Field == "" {
-				return fmt.Errorf("字段策略必须包含角色、资源和字段")
+			if err := normalizeFieldPolicy(*data, &item, nil); err != nil {
+				return err
+			}
+			if fieldPolicyExists(*data, item.RoleCode, item.Resource, item.Field, 0) {
+				return fmt.Errorf("字段策略已存在")
 			}
 			item.ID = nextID(data, "fieldPolicy")
-			item.Mask = fallback(item.Mask, "phone")
-			item.Enabled = true
 			data.FieldPolicies = append(data.FieldPolicies, item)
 			addAudit(data, session.User.Username, "create", "field_policy", item.ID, item.RoleCode+"/"+item.Resource+"/"+item.Field, clientIP(r))
 			return nil
 		})
 		a.respondMutation(w, err, item, "system.field_policy.created")
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodPut {
+		id, _ := strconv.ParseInt(parts[0], 10, 64)
+		var item FieldPolicy
+		if err := readJSON(r, &item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid field policy")
+			return
+		}
+		var updated FieldPolicy
+		err := a.store.Mutate(func(data *AppData) error {
+			for i := range data.FieldPolicies {
+				if data.FieldPolicies[i].ID != id {
+					continue
+				}
+				current := data.FieldPolicies[i]
+				item.ID = id
+				if err := normalizeFieldPolicy(*data, &item, &current); err != nil {
+					return err
+				}
+				if fieldPolicyExists(*data, item.RoleCode, item.Resource, item.Field, id) {
+					return fmt.Errorf("字段策略已存在")
+				}
+				data.FieldPolicies[i] = item
+				updated = item
+				addAudit(data, session.User.Username, "update", "field_policy", id, updated.RoleCode+"/"+updated.Resource+"/"+updated.Field, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("字段策略不存在")
+		})
+		a.respondMutation(w, err, updated, "system.field_policy.updated")
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[0], 10, 64)
+		var deleted FieldPolicy
+		err := a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.FieldPolicies {
+				if item.ID != id {
+					continue
+				}
+				deleted = item
+				data.FieldPolicies = append(data.FieldPolicies[:i], data.FieldPolicies[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "field_policy", id, item.RoleCode+"/"+item.Resource+"/"+item.Field, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("字段策略不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("system.field_policy.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "toggle" && r.Method == http.MethodPost {
@@ -1936,6 +2939,40 @@ func (a *App) systemFieldPolicies(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown field policy route")
+}
+
+func normalizeFieldPolicy(data AppData, item *FieldPolicy, current *FieldPolicy) error {
+	if current != nil {
+		item.RoleCode = fallback(strings.TrimSpace(item.RoleCode), current.RoleCode)
+		item.Resource = fallback(strings.TrimSpace(item.Resource), current.Resource)
+		item.Field = fallback(strings.TrimSpace(item.Field), current.Field)
+		item.Mask = fallback(strings.TrimSpace(item.Mask), current.Mask)
+		item.Remark = strings.TrimSpace(item.Remark)
+		item.Enabled = current.Enabled
+	} else {
+		item.RoleCode = strings.TrimSpace(item.RoleCode)
+		item.Resource = strings.TrimSpace(item.Resource)
+		item.Field = strings.TrimSpace(item.Field)
+		item.Mask = fallback(strings.TrimSpace(item.Mask), "phone")
+		item.Remark = strings.TrimSpace(item.Remark)
+		item.Enabled = true
+	}
+	if item.RoleCode == "" || item.Resource == "" || item.Field == "" {
+		return fmt.Errorf("字段策略必须包含角色、资源和字段")
+	}
+	if !roleExists(data.Roles, item.RoleCode) {
+		return fmt.Errorf("角色不存在")
+	}
+	return nil
+}
+
+func fieldPolicyExists(data AppData, roleCode, resource, field string, exceptID int64) bool {
+	for _, item := range data.FieldPolicies {
+		if item.ID != exceptID && item.RoleCode == roleCode && item.Resource == resource && item.Field == field {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) systemBackups(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
@@ -1988,41 +3025,6 @@ func (a *App) systemBackups(w http.ResponseWriter, r *http.Request, session Sess
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown backup route")
-}
-
-func (a *App) simulate(w http.ResponseWriter, r *http.Request, session Session, parts []string) {
-	if len(parts) == 1 && parts[0] == "tick" && r.Method == http.MethodPost {
-		var events []VehicleLocationEvent
-		err := a.store.Mutate(func(data *AppData) error {
-			for _, latest := range data.LatestLocations {
-				if latest.OnlineStatus != "online" {
-					continue
-				}
-				latest.Longitude += 0.0012
-				latest.Latitude -= 0.0008
-				latest.Speed = 28 + float64(latest.VehicleID*3)
-				event := VehicleLocationEvent{
-					ID: nextID(data, "location"), VehicleID: latest.VehicleID, PlateNo: latest.PlateNo,
-					Longitude: latest.Longitude, Latitude: latest.Latitude, Speed: latest.Speed,
-					Direction: 150, OnlineStatus: "online", Address: inferAddress(*data, latest.Longitude, latest.Latitude),
-					LocationTime: nowString(), ReceiveTime: nowString(), SourceType: "simulator",
-				}
-				data.Locations = append(data.Locations, event)
-				upsertLatestLocation(data, latest)
-				events = append(events, event)
-			}
-			addAudit(data, session.User.Username, "simulate", "vehicle_location", 0, "tick", clientIP(r))
-			return nil
-		})
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		a.emit("vehicle.location.update", events)
-		writeJSON(w, http.StatusOK, events)
-		return
-	}
-	writeError(w, http.StatusNotFound, "unknown simulate route")
 }
 
 func number(prefix string, id int64) string {

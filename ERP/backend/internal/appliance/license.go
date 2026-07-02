@@ -1,6 +1,7 @@
 package appliance
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -130,13 +132,6 @@ func (a *App) importLicensePackage(w http.ResponseWriter, r *http.Request, sessi
 }
 
 func verifyActiveLicense(data AppData) LicenseVerification {
-	if strings.HasPrefix(data.License.Signature, "local-demo") {
-		return LicenseVerification{
-			Valid: true, Reason: "local demo license", License: data.License,
-			ModuleCount: len(data.License.Modules), MaxSites: data.License.MaxSites, MaxVehicles: data.License.MaxVehicles,
-			Signature: "local-demo", Fingerprint: data.License.PublicKeyFingerprint, VerifiedAt: nowString(),
-		}
-	}
 	pkg := LicensePackage{
 		LicenseID: data.License.LicenseID, CustomerName: data.License.CustomerName, Watermark: data.License.Watermark,
 		ExpiresAt: data.License.ExpiresAt, Edition: data.License.Edition, Modules: data.License.Modules,
@@ -178,6 +173,12 @@ func verifyLicensePackage(item LicensePackage, data AppData) (bool, string) {
 	if err != nil {
 		return false, err.Error()
 	}
+	if item.PublicKeyFingerprint != "" && item.PublicKeyFingerprint != licensePublicKeyFingerprint(item.PublicKey) {
+		return false, "授权公钥指纹不匹配"
+	}
+	if trusted, reason := licensePublicKeyTrusted(publicKey); !trusted {
+		return false, reason
+	}
 	signature, err := decodeLicenseSignature(item.Signature)
 	if err != nil {
 		return false, err.Error()
@@ -190,6 +191,69 @@ func verifyLicensePackage(item LicensePackage, data AppData) (bool, string) {
 		return false, "授权签名无效"
 	}
 	return true, "valid"
+}
+
+func licensePublicKeyTrusted(publicKey ed25519.PublicKey) (bool, string) {
+	trustedKeys, err := trustedLicensePublicKeys()
+	if err != nil {
+		return false, err.Error()
+	}
+	if len(trustedKeys) == 0 {
+		return false, "授权签发公钥未配置"
+	}
+	for _, trustedKey := range trustedKeys {
+		if bytes.Equal(trustedKey, publicKey) {
+			return true, "trusted"
+		}
+	}
+	return false, "授权签发公钥不受信任"
+}
+
+func trustedLicensePublicKeys() ([]ed25519.PublicKey, error) {
+	values := []string{}
+	values = append(values, splitLicenseKeyList(os.Getenv("CBMP_LICENSE_TRUSTED_PUBLIC_KEYS"))...)
+	if value := strings.TrimSpace(os.Getenv("CBMP_LICENSE_ISSUER_PUBLIC_KEY")); value != "" {
+		values = append(values, value)
+	}
+	keys := make([]ed25519.PublicKey, 0, len(values)+1)
+	seen := map[string]bool{}
+	for _, value := range values {
+		key, err := decodeLicensePublicKey(value)
+		if err != nil {
+			return nil, fmt.Errorf("受信授权公钥配置无效")
+		}
+		fingerprint := licensePublicKeyFingerprint(value)
+		if fingerprint == "" || seen[fingerprint] {
+			continue
+		}
+		seen[fingerprint] = true
+		keys = append(keys, key)
+	}
+	if value := strings.TrimSpace(os.Getenv("CBMP_LICENSE_ISSUER_PRIVATE_KEY")); value != "" {
+		privateKey, err := decodeLicensePrivateKey(value)
+		if err != nil {
+			return nil, err
+		}
+		publicValue := "ed25519:" + base64.RawStdEncoding.EncodeToString(privateKey.Public().(ed25519.PublicKey))
+		fingerprint := licensePublicKeyFingerprint(publicValue)
+		if fingerprint != "" && !seen[fingerprint] {
+			keys = append(keys, privateKey.Public().(ed25519.PublicKey))
+		}
+	}
+	return keys, nil
+}
+
+func splitLicenseKeyList(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	out := []string{}
+	for _, field := range fields {
+		if field = strings.TrimSpace(field); field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 func licenseRevoked(data AppData, licenseID string) (bool, string) {

@@ -37,6 +37,9 @@ func (a *App) actApproval(w http.ResponseWriter, r *http.Request, session Sessio
 	}
 
 	var updated ApprovalTask
+	var auditAction string
+	var resultFailure WorkflowInstance
+	var resultErr error
 	err := a.store.Mutate(func(data *AppData) error {
 		for i := range data.ApprovalTasks {
 			if data.ApprovalTasks[i].ID != id {
@@ -49,78 +52,83 @@ func (a *App) actApproval(w http.ResponseWriter, r *http.Request, session Sessio
 				return fmt.Errorf("无权审批当前步骤")
 			}
 			task := &data.ApprovalTasks[i]
-			task.Actions = append(task.Actions, ApprovalTaskAction{
-				Seq:      len(task.Actions) + 1,
-				Step:     task.CurrentStep,
-				RoleCode: task.CurrentRole,
-				Action:   req.Action,
-				Actor:    session.User.Username,
-				Comment:  strings.TrimSpace(req.Comment),
-				ActedAt:  nowString(),
-			})
-			task.UpdatedAt = nowString()
-			if req.Action == "reject" {
-				task.Status = "rejected"
-				task.CurrentRole = ""
-				if err := applyApprovalResult(data, *task); err != nil {
-					return err
-				}
-				updated = *task
-				addAudit(data, session.User.Username, "reject", "approval_task", task.ID, task.TaskNo, clientIP(r))
-				return nil
-			}
-			next, ok := nextApprovalStep(*data, *task)
-			if ok {
-				task.CurrentStep = next.Seq
-				task.CurrentRole = next.RoleCode
-				updated = *task
-				addAudit(data, session.User.Username, "approve_step", "approval_task", task.ID, task.TaskNo, clientIP(r))
-				return nil
-			}
-			task.Status = "approved"
-			task.CurrentRole = ""
-			if err := applyApprovalResult(data, *task); err != nil {
+			if err := ensureWorkflowForApprovalTask(data, task); err != nil {
 				return err
 			}
+			instance, err := actWorkflowInstance(data, task.WorkflowInstanceID, workflowActionRequest{
+				Action:        req.Action,
+				Actor:         session.User.Username,
+				ActorRole:     session.User.RoleCode,
+				Comment:       req.Comment,
+				AllowOverride: canAccess(*data, session.User, "*"),
+			})
+			if err != nil {
+				return err
+			}
+			syncApprovalTaskFromWorkflow(task, instance)
+			switch task.Status {
+			case "rejected":
+				auditAction = "reject"
+				if err := applyApprovalResult(data, *task); err != nil {
+					resultFailure = workflowInstanceFromApprovalTask(*task)
+					resultErr = err
+					return err
+				}
+			case "approved":
+				auditAction = "approve"
+				if err := applyApprovalResult(data, *task); err != nil {
+					resultFailure = workflowInstanceFromApprovalTask(*task)
+					resultErr = err
+					return err
+				}
+			default:
+				auditAction = "approve_step"
+			}
 			updated = *task
-			addAudit(data, session.User.Username, "approve", "approval_task", task.ID, task.TaskNo, clientIP(r))
+			addAudit(data, session.User.Username, auditAction, "approval_task", task.ID, task.TaskNo, clientIP(r))
 			return nil
 		}
 		return fmt.Errorf("审批任务不存在")
 	})
+	a.recordWorkflowResultFailure(resultFailure, resultErr)
 	a.respondMutation(w, err, updated, "approval.task.updated")
 }
 
 func submitApprovalTask(data *AppData, flowCode, resource string, resourceID int64, resourceNo, title, applicant, reason string) (ApprovalTask, error) {
-	for _, task := range data.ApprovalTasks {
-		if task.Resource == resource && task.ResourceID == resourceID && task.Status == "pending" {
-			return task, nil
+	for i := range data.ApprovalTasks {
+		if data.ApprovalTasks[i].Resource == resource && data.ApprovalTasks[i].ResourceID == resourceID && data.ApprovalTasks[i].Status == "pending" {
+			if err := ensureWorkflowForApprovalTask(data, &data.ApprovalTasks[i]); err != nil {
+				return ApprovalTask{}, err
+			}
+			return data.ApprovalTasks[i], nil
 		}
 	}
 	flow, ok := activeApprovalFlow(*data, flowCode)
 	if !ok || len(flow.Steps) == 0 {
 		return ApprovalTask{}, fmt.Errorf("审批流未配置: %s", flowCode)
 	}
-	first := flow.Steps[0]
-	now := nowString()
-	task := ApprovalTask{
-		ID:          nextID(data, "approvalTask"),
-		TaskNo:      number("APV", data.Next["approvalTask"]),
-		FlowCode:    flow.Code,
-		FlowName:    flow.Name,
-		Resource:    resource,
-		ResourceID:  resourceID,
-		ResourceNo:  resourceNo,
-		Title:       title,
-		Applicant:   applicant,
-		CurrentStep: first.Seq,
-		CurrentRole: first.RoleCode,
-		Status:      "pending",
-		Reason:      reason,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Actions:     []ApprovalTaskAction{},
+	if _, err := upsertApprovalWorkflowDefinition(data, flow); err != nil {
+		return ApprovalTask{}, err
 	}
+	instance, err := startWorkflowInstance(data, workflowStartRequest{
+		DefinitionCode: flowCode,
+		Resource:       resource,
+		ResourceID:     resourceID,
+		ResourceNo:     resourceNo,
+		Title:          title,
+		Applicant:      applicant,
+		Reason:         reason,
+	})
+	if err != nil {
+		return ApprovalTask{}, err
+	}
+	taskID := nextID(data, "approvalTask")
+	task := ApprovalTask{
+		ID:      taskID,
+		TaskNo:  number("APV", taskID),
+		Actions: []ApprovalTaskAction{},
+	}
+	syncApprovalTaskFromWorkflow(&task, instance)
 	data.ApprovalTasks = append(data.ApprovalTasks, task)
 	return task, nil
 }
@@ -181,43 +189,6 @@ func nextApprovalStep(data AppData, task ApprovalTask) (ApprovalStep, bool) {
 		}
 	}
 	return ApprovalStep{}, false
-}
-
-func applyApprovalResult(data *AppData, task ApprovalTask) error {
-	switch task.Resource {
-	case "sales_order":
-		for i := range data.Orders {
-			if data.Orders[i].ID != task.ResourceID {
-				continue
-			}
-			if task.Status == "approved" {
-				data.Orders[i].Status = "submitted"
-			}
-			if task.Status == "rejected" {
-				data.Orders[i].Status = "rejected"
-			}
-			return nil
-		}
-		return fmt.Errorf("审批关联订单不存在")
-	case "inventory_transfer":
-		for i := range data.InventoryTransfers {
-			if data.InventoryTransfers[i].ID != task.ResourceID {
-				continue
-			}
-			if task.Status == "approved" {
-				data.InventoryTransfers[i].Status = "approved"
-			}
-			if task.Status == "rejected" {
-				data.InventoryTransfers[i].Status = "rejected"
-			}
-			return nil
-		}
-		return fmt.Errorf("审批关联调拨单不存在")
-	case "contract":
-		return applyContractApprovalResult(data, task)
-	default:
-		return nil
-	}
 }
 
 func findInventoryTransfer(data AppData, id int64) (InventoryTransfer, bool) {

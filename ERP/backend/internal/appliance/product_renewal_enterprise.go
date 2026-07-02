@@ -1,3 +1,5 @@
+//go:build legacy_product_ops
+
 package appliance
 
 import (
@@ -138,6 +140,11 @@ func (a *App) productOpsRenewalInvoice(w http.ResponseWriter, r *http.Request, s
 			taxRate = 0.06
 		}
 		invoiceNo := fallback(strings.TrimSpace(req.InvoiceNo), number("RI", id))
+		taxStatus := fallback(strings.ToLower(strings.TrimSpace(req.TaxStatus)), "pending")
+		externalRequest := strings.TrimSpace(req.ExternalRequest)
+		if (taxStatus == "accepted" || taxStatus == "submitted") && externalRequest == "" {
+			return fmt.Errorf("续费发票税控已受理必须提供真实外部请求号")
+		}
 		invoice = ProductRenewalInvoice{
 			ID:              id,
 			InvoiceNo:       invoiceNo,
@@ -152,12 +159,12 @@ func (a *App) productOpsRenewalInvoice(w http.ResponseWriter, r *http.Request, s
 			TaxAmount:       round(amount * taxRate),
 			InvoiceType:     fallback(strings.TrimSpace(req.InvoiceType), "blue_e_invoice"),
 			Status:          fallback(strings.TrimSpace(req.Status), "issued"),
-			TaxStatus:       fallback(strings.TrimSpace(req.TaxStatus), "accepted"),
-			FileURL:         fallback(strings.TrimSpace(req.FileURL), "renewal-invoice://"+invoiceNo+".pdf"),
+			TaxStatus:       taxStatus,
+			FileURL:         strings.TrimSpace(req.FileURL),
 			CreatedBy:       session.User.DisplayName,
 			CreatedAt:       now,
 			IssuedAt:        fallback(strings.TrimSpace(req.IssuedAt), now),
-			ExternalRequest: fallback(strings.TrimSpace(req.ExternalRequest), "local-tax-"+invoiceNo),
+			ExternalRequest: externalRequest,
 			Remark:          strings.TrimSpace(req.Remark),
 		}
 		data.ProductRenewalInvoices = append(data.ProductRenewalInvoices, invoice)
@@ -227,7 +234,6 @@ func (a *App) productOpsRenewalESign(w http.ResponseWriter, r *http.Request, ses
 				Phone:        strings.TrimSpace(req.Phone),
 				Channel:      fallback(strings.TrimSpace(req.Channel), "local_esign"),
 				Status:       "sent",
-				LinkURL:      "/public/renewal-sign/" + signNo,
 				SentBy:       session.User.DisplayName,
 				SentAt:       now,
 				Remark:       strings.TrimSpace(req.Remark),
@@ -264,10 +270,14 @@ func (a *App) productOpsRenewalESign(w http.ResponseWriter, r *http.Request, ses
 			if index < 0 {
 				return fmt.Errorf("没有待签署的续费电子签")
 			}
+			signature := strings.TrimSpace(req.Signature)
+			if signature == "" {
+				return fmt.Errorf("续费电子签必须包含真实签名")
+			}
 			sign = data.ProductRenewalESigns[index]
 			sign.Status = "signed"
 			sign.SignedAt = now
-			sign.Signature = fallback(strings.TrimSpace(req.Signature), sign.Signer+" 电子签名")
+			sign.Signature = signature
 			sign.Remark = fallback(strings.TrimSpace(req.Remark), sign.Remark)
 			data.ProductRenewalESigns[index] = sign
 			contract.Status = "signed"

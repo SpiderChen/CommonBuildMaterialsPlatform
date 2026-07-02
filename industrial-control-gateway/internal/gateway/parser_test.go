@@ -6,12 +6,12 @@ import (
 )
 
 func TestParseJSONFrame(t *testing.T) {
-	raw := `{"deviceNo":"PLC-1","assetNo":"HZS180-A","eventType":"batch","timestamp":"2026-06-18 10:20:00","readings":{"cement":{"value":8.32,"unit":"t"},"water":1.2},"shift":"A"}`
+	raw := `{"deviceNo":"PLC-1","assetNo":"AMP240-A","eventType":"batch","timestamp":"2026-06-18 10:20:00","readings":{"bitumen":{"value":8.32,"unit":"t"},"temperature":165},"shift":"A"}`
 	msg, err := ParseFrame(raw, "test", "http", "industrial-json", time.Date(2026, 6, 18, 10, 30, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("ParseFrame returned error: %v", err)
 	}
-	if msg.DeviceNo != "PLC-1" || msg.AssetNo != "HZS180-A" || msg.EventType != "batch" {
+	if msg.DeviceNo != "PLC-1" || msg.AssetNo != "AMP240-A" || msg.EventType != "batch" {
 		t.Fatalf("unexpected identity: %+v", msg)
 	}
 	if len(msg.Readings) != 2 {
@@ -23,7 +23,7 @@ func TestParseJSONFrame(t *testing.T) {
 }
 
 func TestParseCSVFrame(t *testing.T) {
-	raw := "PLC,PLC-2,HZS120-B,telemetry,temp=42.5:C:good|pressure=1.28:MPa,2026-06-18 11:00:00"
+	raw := "PLC,PLC-2,AMP160-B,telemetry,temp=165:C:good|pressure=1.28:MPa,2026-06-18 11:00:00"
 	msg, err := ParseFrame(raw, "test", "tcp", "industrial-csv", time.Now())
 	if err != nil {
 		t.Fatalf("ParseFrame returned error: %v", err)

@@ -56,13 +56,14 @@ func NewTaxGatewayConfigFromEnv() TaxGatewayConfig {
 	if retries < 0 {
 		retries = 0
 	}
+	endpoint := strings.TrimSpace(os.Getenv("CBMP_TAX_GATEWAY_URL"))
 	provider := strings.TrimSpace(os.Getenv("CBMP_TAX_GATEWAY_PROVIDER"))
 	if provider == "" {
-		provider = "local-simulator"
+		provider = defaultTaxGatewayProvider(endpoint)
 	}
 	return TaxGatewayConfig{
 		Provider:  provider,
-		URL:       strings.TrimSpace(os.Getenv("CBMP_TAX_GATEWAY_URL")),
+		URL:       endpoint,
 		Token:     strings.TrimSpace(os.Getenv("CBMP_TAX_GATEWAY_TOKEN")),
 		Secret:    strings.TrimSpace(os.Getenv("CBMP_TAX_GATEWAY_SECRET")),
 		Timeout:   time.Duration(timeoutMs) * time.Millisecond,
@@ -80,12 +81,9 @@ func (r *RuntimeServices) SubmitTaxRedInvoice(ctx context.Context, invoice Sales
 }
 
 func (r *RuntimeServices) submitTaxGateway(ctx context.Context, invoice SalesInvoice, original *SalesInvoice, action string) taxGatewayResult {
-	cfg := TaxGatewayConfig{Provider: "local-simulator", Timeout: 2500 * time.Millisecond, UserAgent: "cbmp-appliance/1.0"}
+	cfg := TaxGatewayConfig{Timeout: 2500 * time.Millisecond, UserAgent: "cbmp-appliance/1.0"}
 	if r != nil {
 		cfg = r.taxGateway
-		if cfg.Provider == "" {
-			cfg.Provider = "local-simulator"
-		}
 		if cfg.Timeout <= 0 {
 			cfg.Timeout = 2500 * time.Millisecond
 		}
@@ -93,23 +91,27 @@ func (r *RuntimeServices) submitTaxGateway(ctx context.Context, invoice SalesInv
 			cfg.UserAgent = "cbmp-appliance/1.0"
 		}
 	}
-	if cfg.URL == "" || strings.HasPrefix(cfg.URL, "mock://") || strings.HasPrefix(cfg.URL, "tax://") {
-		start := time.Now()
-		taxPrefix := "TAX"
-		fileSuffix := ".pdf"
-		if action == "red_offset" {
-			taxPrefix = "REDTAX"
-			fileSuffix = "-red.pdf"
-		}
+	if cfg.Provider == "" {
+		cfg.Provider = defaultTaxGatewayProvider(cfg.URL)
+	}
+	if cfg.URL == "" {
 		return taxGatewayResult{
-			Provider:     cfg.Provider,
-			Endpoint:     "tax://local-simulator",
-			RequestID:    taxGatewayRequestID(invoice, action),
-			Status:       "submitted",
-			TaxControlNo: number(taxPrefix, invoice.ID),
-			FileURL:      "invoice://" + invoice.InvoiceNo + fileSuffix,
-			Attempt:      1,
-			DurationMs:   time.Since(start).Milliseconds(),
+			Provider:  cfg.Provider,
+			Endpoint:  strings.TrimSpace(cfg.URL),
+			RequestID: taxGatewayRequestID(invoice, action),
+			Status:    "failed",
+			Error:     "税控网关未配置真实 endpoint",
+			Attempt:   1,
+		}
+	}
+	if err := validateNoMockEndpoint(cfg.URL, "税控网关 endpoint"); err != nil {
+		return taxGatewayResult{
+			Provider:  cfg.Provider,
+			Endpoint:  strings.TrimSpace(cfg.URL),
+			RequestID: taxGatewayRequestID(invoice, action),
+			Status:    "failed",
+			Error:     err.Error(),
+			Attempt:   1,
 		}
 	}
 	return submitTaxInvoiceHTTP(ctx, cfg, invoice, original, action)
@@ -388,7 +390,7 @@ func verifyTaxGatewayCallbackSignature(secret, timestamp, signature string, body
 
 func sanitizedTaxEndpoint(raw string) string {
 	if strings.TrimSpace(raw) == "" {
-		return "tax://local-simulator"
+		return ""
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -402,9 +404,6 @@ func sanitizedTaxEndpoint(raw string) string {
 
 func updateTaxIntegrationEndpoint(data *AppData, result taxGatewayResult, status string) {
 	endpoint := result.Endpoint
-	if endpoint == "" {
-		endpoint = "tax://local-simulator"
-	}
 	for i := range data.IntegrationEndpoints {
 		item := data.IntegrationEndpoints[i]
 		if item.Type == "finance" && (strings.Contains(item.Name, "税控") || strings.Contains(item.URL, "tax")) {
@@ -424,6 +423,17 @@ func updateTaxIntegrationEndpoint(data *AppData, result taxGatewayResult, status
 		Status:     status,
 		LastSyncAt: nowString(),
 	})
+}
+
+func defaultTaxGatewayProvider(endpoint string) string {
+	normalized := strings.ToLower(strings.TrimSpace(endpoint))
+	if normalized == "" {
+		return ""
+	}
+	if strings.HasPrefix(normalized, "mock://") || strings.HasPrefix(normalized, "tax://") {
+		return ""
+	}
+	return "external-tax"
 }
 
 func intFromEnv(name string, fallbackValue int) int {

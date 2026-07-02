@@ -47,27 +47,87 @@ export ICG_PROTOCOL="plant-json"
 export ICG_HTTP_BEARER_TOKEN="设备或用户令牌"
 ```
 
+ERP 生产线不需要手工填写接口地址；生产线档案的 `code` 需要和网关上报的 `plantCode` 一致。`protocol-frame` 模式会保留 `raw`，并在识别到 plant 批次帧时补充 ERP 可消费的 `payload`。
+
+对接生产线暂存仓位、骨料仓料位时，把目标地址切到：
+
+```bash
+export ICG_HTTP_TARGETS="http://127.0.0.1:8088/api/production-plans/protocols/buffer/ingest"
+export ICG_FORWARD_MODE="protocol-frame"
+export ICG_PROTOCOL="buffer-json"
+export ICG_HTTP_BEARER_TOKEN="设备或用户令牌"
+```
+
+仓位上报的 `bufferCode` 需要和 ERP 生产线管理里的暂存仓位编码一致。
+
+对接站点堆场、堆位料位时，把目标地址切到：
+
+```bash
+export ICG_HTTP_TARGETS="http://127.0.0.1:8088/api/production-plans/protocols/yard/ingest"
+export ICG_FORWARD_MODE="protocol-frame"
+export ICG_PROTOCOL="yard-json"
+export ICG_HTTP_BEARER_TOKEN="设备或用户令牌"
+```
+
+堆场上报的 `yardCode` 和 `pileCode` 需要分别和 ERP 采购库存里的堆场编码、堆位编码一致。`yard-json`、`yard_level`、`stockpile_level`、`pile_level` 都会被转换为 ERP 堆位料位 payload。
+
 ## 示例
 
-JSON:
+生产批次 JSON:
 
 ```json
 {
-  "deviceNo": "PLC-HZS180-01",
-  "assetNo": "NS-HZS180",
-  "eventType": "telemetry",
-  "timestamp": "2026-06-18 10:20:00",
-  "readings": {
-    "cement": {"value": 8.32, "unit": "t"},
-    "water": 1.2
-  }
+  "deviceNo": "PLANT-NS-AMP240",
+  "plantCode": "NS-AMP240",
+  "taskId": 20,
+  "batchNo": "PLC-BATCH-001",
+  "quantity": 6,
+  "operator": "PLC-A",
+  "qualityStatus": "pending",
+  "status": "released",
+  "completedAt": "2026-06-20 09:20:00",
+  "eventType": "batch"
 }
 ```
 
-CSV:
+生产批次 CSV:
 
 ```text
-PLC,PLC-HZS180-01,NS-HZS180,telemetry,cement=8.32:t:good|water=1.2:t,2026-06-18 10:20:00
+PLANT,PLANT-NS-AMP240,NS-AMP240,batch,taskId=20|quantity=6,2026-06-20 09:20:00
+```
+
+骨料仓料位 JSON:
+
+```json
+{
+  "deviceNo": "PLANT-NS-AMP240",
+  "plantCode": "NS-AMP240",
+  "bufferCode": "NS-AMP240-AGG-01",
+  "materialId": 3,
+  "quantity": 32.5,
+  "moistureRate": 4.2,
+  "qualityStatus": "passed",
+  "status": "active",
+  "eventType": "buffer_level",
+  "reportedAt": "2026-06-21 22:50:00"
+}
+```
+
+堆场堆位料位 JSON:
+
+```json
+{
+  "deviceNo": "YARD-NS-AGG",
+  "yardCode": "NS-YARD-AGG",
+  "pileCode": "NS-YARD-SAND-01",
+  "materialId": 3,
+  "quantity": 538.5,
+  "moistureRate": 4.7,
+  "qualityStatus": "passed",
+  "status": "active",
+  "eventType": "yard_level",
+  "reportedAt": "2026-06-21 23:10:00"
+}
 ```
 
 ## 验证与构建

@@ -1,3 +1,5 @@
+//go:build legacy_product_ops
+
 package appliance
 
 import (
@@ -26,6 +28,9 @@ func normalizeProductAlertChannel(req ProductAlertChannel, actor string) (Produc
 	req.Secret = strings.TrimSpace(req.Secret)
 	req.Status = fallback(strings.ToLower(strings.TrimSpace(req.Status)), "active")
 	req.Remark = strings.TrimSpace(req.Remark)
+	if err := validateNoMockEndpoint(req.Endpoint, "通知通道 endpoint"); err != nil {
+		return req, err
+	}
 	if req.Name == "" {
 		return req, fmt.Errorf("通知通道名称不能为空")
 	}
@@ -36,6 +41,9 @@ func normalizeProductAlertChannel(req ProductAlertChannel, actor string) (Produc
 	case "sse", "local", "webhook", "enterprise_wechat", "sms", "itsm":
 	default:
 		return req, fmt.Errorf("通知通道类型必须是 sse、local、webhook、enterprise_wechat、sms 或 itsm")
+	}
+	if req.Status == "active" && req.Type != "sse" && req.Type != "local" && req.Endpoint == "" {
+		return req, fmt.Errorf("启用外部通知通道必须配置真实 endpoint")
 	}
 	if req.Code == "" {
 		req.Code = req.Type
@@ -300,11 +308,8 @@ func productAlertChannelForNotification(data AppData, notification ProductAlertN
 
 func postProductAlertWebhook(notification *ProductAlertNotification, channel *ProductAlertChannel) error {
 	endpoint := strings.TrimSpace(notification.Endpoint)
-	switch {
-	case endpoint == "mock://success":
-		return nil
-	case endpoint == "mock://fail":
-		return fmt.Errorf("mock notification delivery failed")
+	if err := validateNoMockEndpoint(endpoint, "通知通道 endpoint"); err != nil {
+		return err
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {

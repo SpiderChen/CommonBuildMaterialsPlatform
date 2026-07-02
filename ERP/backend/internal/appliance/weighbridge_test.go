@@ -76,6 +76,59 @@ func TestTicketReprintAndVoidApprovalFlow(t *testing.T) {
 	}
 }
 
+func TestTicketVoidWorkflowApprovalFlow(t *testing.T) {
+	app := newTestHTTPApp(t)
+	token := testLogin(t, app, "admin", "admin123")
+
+	rec := testRequest(t, app, token, http.MethodPost, "/api/system/workflows/definitions", `{"code":"ticket_void_review","name":"磅单作废复核","category":"approval","resource":"ticket_void","trigger":{"eventType":"ticket_void.requested","resource":"ticket_void"},"steps":[{"seq":1,"roleCode":"boss","action":"approve","name":"作废复核"}],"status":"active","version":1}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create ticket void workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/weighbridge/tickets/1/void/request", `{"reason":"地磅重量争议复核"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("void request status %d: %s", rec.Code, rec.Body.String())
+	}
+	var voidLog TicketVoidLog
+	if err := json.Unmarshal(rec.Body.Bytes(), &voidLog); err != nil {
+		t.Fatalf("decode void log: %v", err)
+	}
+	if voidLog.Status != "pending" || voidLog.ID == 0 {
+		t.Fatalf("unexpected pending void log: %+v", voidLog)
+	}
+	snapshot := app.mustSnapshot()
+	if len(snapshot.WorkflowEvents) != 1 || snapshot.WorkflowEvents[0].EventType != "ticket_void.requested" || snapshot.WorkflowEvents[0].ResourceID != voidLog.ID || snapshot.WorkflowEvents[0].Status != "handled" {
+		t.Fatalf("expected handled ticket void workflow event, got %+v", snapshot.WorkflowEvents)
+	}
+	if len(snapshot.WorkflowTasks) != 1 || snapshot.WorkflowTasks[0].Resource != "ticket_void" || snapshot.WorkflowTasks[0].ResourceID != voidLog.ID || snapshot.WorkflowTasks[0].Status != "pending" {
+		t.Fatalf("expected pending ticket void workflow task, got %+v", snapshot.WorkflowTasks)
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/weighbridge/tickets/1/void/approve", `{"approved":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("direct void approve should not bypass pending workflow, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testRequest(t, app, token, http.MethodPost, "/api/system/workflows/tasks/"+strconv.FormatInt(snapshot.WorkflowTasks[0].ID, 10)+"/act", `{"action":"approve","comment":"作废复核通过"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("act ticket void workflow status %d: %s", rec.Code, rec.Body.String())
+	}
+	tickets := fetchTickets(t, app, token)
+	if tickets[0].Status != "void" || tickets[0].SettlementStatus != "void" || tickets[0].SignStatus != "void" {
+		t.Fatalf("expected void ticket status after workflow approval, got %+v", tickets[0])
+	}
+	var approvedVoid TicketVoidLog
+	for _, item := range app.mustSnapshot().TicketVoidLogs {
+		if item.ID == voidLog.ID {
+			approvedVoid = item
+			break
+		}
+	}
+	if approvedVoid.Status != "approved" || approvedVoid.ApprovedBy == "" {
+		t.Fatalf("expected approved void log after workflow result, got %+v", approvedVoid)
+	}
+}
+
 func TestRawMaterialReceiptCreatesInboundScaleTicketAndSnapshots(t *testing.T) {
 	app := newTestHTTPApp(t)
 	token := testLogin(t, app, "admin", "admin123")

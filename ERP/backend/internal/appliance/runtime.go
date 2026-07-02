@@ -84,7 +84,7 @@ func (r *RuntimeServices) Status() RuntimeStatus {
 		RabbitMQ:            "disabled",
 		ClickHouse:          "disabled",
 		EventBus:            "local-sse",
-		TaxGateway:          "local-simulator",
+		TaxGateway:          "unconfigured",
 		MapProvider:         r.mapProvider.Provider,
 		MapTiles:            r.mapProvider.TileStatus(),
 		MapTileURL:          r.mapProvider.PublicRuntimeTileURL(),

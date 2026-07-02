@@ -24,9 +24,11 @@ type plantBatchPayload struct {
 }
 
 type productionMaterialConsumption struct {
-	MaterialID int64   `json:"materialId"`
-	Quantity   float64 `json:"quantity"`
-	Unit       string  `json:"unit"`
+	MaterialID   int64   `json:"materialId"`
+	Quantity     float64 `json:"quantity"`
+	Unit         string  `json:"unit"`
+	BufferCode   string  `json:"bufferCode,omitempty"`
+	MoistureRate float64 `json:"moistureRate,omitempty"`
 }
 
 func (a *App) ingestPlantProtocolFrame(w http.ResponseWriter, r *http.Request, session Session) {
@@ -140,6 +142,7 @@ func normalizePlantBatchPayload(payload plantBatchPayload) plantBatchPayload {
 	payload.CompletedAt = strings.TrimSpace(payload.CompletedAt)
 	for i := range payload.Materials {
 		payload.Materials[i].Unit = strings.TrimSpace(payload.Materials[i].Unit)
+		payload.Materials[i].BufferCode = strings.TrimSpace(payload.Materials[i].BufferCode)
 	}
 	return payload
 }
@@ -168,7 +171,11 @@ func parsePlantMaterialCSV(raw string) ([]productionMaterialConsumption, error) 
 		if len(parts) > 2 {
 			unit = strings.TrimSpace(parts[2])
 		}
-		materials = append(materials, productionMaterialConsumption{MaterialID: materialID, Quantity: quantity, Unit: unit})
+		bufferCode := ""
+		if len(parts) > 3 {
+			bufferCode = strings.TrimSpace(parts[3])
+		}
+		materials = append(materials, productionMaterialConsumption{MaterialID: materialID, Quantity: quantity, Unit: unit, BufferCode: bufferCode})
 	}
 	return materials, nil
 }
@@ -186,6 +193,9 @@ func (a *App) recordPlantProductionBatch(r *http.Request, session Session, paylo
 		plan, ok := findProductionPlan(*data, task.PlanID)
 		if !ok {
 			return fmt.Errorf("生产计划不存在")
+		}
+		if err := ensureProductionTaskPlant(*data, &task, plan); err != nil {
+			return err
 		}
 		mix, ok := findMixDesign(*data, task.MixDesignID)
 		if !ok {
@@ -205,10 +215,14 @@ func (a *App) recordPlantProductionBatch(r *http.Request, session Session, paylo
 		item.PlanID = task.PlanID
 		item.OrderID = task.OrderID
 		item.SiteID = task.SiteID
+		item.PlantID = task.PlantID
 		item.ProductID = task.ProductID
 		item.MixDesignID = task.MixDesignID
 		item.Quantity = quantity
-		item.PlantCode = fallback(payload.PlantCode, defaultPlantCode(*data, task.SiteID))
+		if strings.TrimSpace(payload.PlantCode) != "" && !strings.EqualFold(payload.PlantCode, task.PlantCode) {
+			return fmt.Errorf("生产批次生产线必须与任务一致")
+		}
+		item.PlantCode = task.PlantCode
 		item.Operator = fallback(payload.Operator, session.User.DisplayName)
 		item.QualityStatus = fallback(payload.QualityStatus, "pending")
 		item.Status = fallback(payload.Status, "produced")

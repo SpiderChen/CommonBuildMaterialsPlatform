@@ -27,17 +27,28 @@ func (a *App) createInventoryTransfer(w http.ResponseWriter, r *http.Request, se
 		item.Status = "pending_approval"
 		item.CreatedAt = nowString()
 		data.InventoryTransfers = append(data.InventoryTransfers, item)
-		if _, err := submitApprovalTask(
-			data,
-			"inventory_transfer",
-			"inventory_transfer",
-			item.ID,
-			item.TransferNo,
-			"库存调拨审批",
-			session.User.Username,
-			fmt.Sprintf("调拨物料 %d: %d -> %d, 数量 %.2f%s", item.MaterialID, item.FromSiteID, item.ToSiteID, item.Quantity, item.Unit),
-		); err != nil {
+		reason := fmt.Sprintf("调拨物料 %d: %d -> %d, 数量 %.2f%s", item.MaterialID, item.FromSiteID, item.ToSiteID, item.Quantity, item.Unit)
+		_, instances, err := publishWorkflowEvent(data, workflowEventRequest{
+			EventType:  "inventory_transfer.submitted",
+			Resource:   "inventory_transfer",
+			ResourceID: item.ID,
+			ResourceNo: item.TransferNo,
+			Title:      "库存调拨审批",
+			Actor:      session.User.Username,
+			Reason:     reason,
+			Variables: map[string]string{
+				"materialId": fmt.Sprintf("%d", item.MaterialID),
+				"fromSiteId": fmt.Sprintf("%d", item.FromSiteID),
+				"toSiteId":   fmt.Sprintf("%d", item.ToSiteID),
+				"quantity":   fmt.Sprintf("%.2f", item.Quantity),
+				"unit":       item.Unit,
+			},
+		})
+		if err != nil {
 			return err
+		}
+		if len(instances) == 0 {
+			return fmt.Errorf("库存调拨工作流未配置")
 		}
 		addAudit(data, session.User.Username, "create", "inventory_transfer", item.ID, item.TransferNo, clientIP(r))
 		return nil
@@ -122,14 +133,9 @@ func (a *App) createInventoryStocktake(w http.ResponseWriter, r *http.Request, s
 
 func (a *App) reviewInventoryStocktake(w http.ResponseWriter, r *http.Request, session Session, id int64) {
 	var item InventoryStocktake
+	topic := "inventory.stocktake.reviewed"
 	err := a.store.Mutate(func(data *AppData) error {
-		idx := -1
-		for i := range data.InventoryStocktakes {
-			if data.InventoryStocktakes[i].ID == id {
-				idx = i
-				break
-			}
-		}
+		idx := inventoryStocktakeIndex(*data, id)
 		if idx < 0 {
 			return fmt.Errorf("盘点单不存在")
 		}
@@ -137,31 +143,87 @@ func (a *App) reviewInventoryStocktake(w http.ResponseWriter, r *http.Request, s
 			item = data.InventoryStocktakes[idx]
 			return nil
 		}
-		item = data.InventoryStocktakes[idx]
-		if !setInventoryQuantity(data, item.SiteID, item.MaterialID, item.ActualQty) {
-			return fmt.Errorf("库存不存在")
+		_, instances, err := publishInventoryStocktakeReviewWorkflow(data, data.InventoryStocktakes[idx], session.User.Username)
+		if err != nil {
+			return err
 		}
-		direction := "in"
-		quantity := item.DiffQty
-		if quantity < 0 {
-			direction = "out"
-			quantity = -quantity
+		if len(instances) > 0 {
+			data.InventoryStocktakes[idx].Status = "pending_approval"
+			item = data.InventoryStocktakes[idx]
+			topic = "inventory.stocktake.workflow_requested"
+			addAudit(data, session.User.Username, "request_review", "inventory_stocktake", item.ID, item.StocktakeNo, clientIP(r))
+			return nil
 		}
-		if quantity > 0 {
-			flowID := nextID(data, "inventoryFlow")
-			data.InventoryFlows = append(data.InventoryFlows, InventoryFlow{
-				ID: flowID, FlowNo: number("IF", flowID), SiteID: item.SiteID, MaterialID: item.MaterialID,
-				SourceType: "inventory_stocktake", SourceID: item.ID, Direction: direction, Quantity: round(quantity),
-				BalanceQty: item.ActualQty, Remark: "库存盘点调整", CreatedAt: nowString(),
-			})
+		next, err := applyInventoryStocktakeReviewLocked(data, id)
+		if err != nil {
+			return err
 		}
-		data.InventoryStocktakes[idx].Status = "completed"
-		data.InventoryStocktakes[idx].ReviewedAt = nowString()
-		item = data.InventoryStocktakes[idx]
+		item = next
 		addAudit(data, session.User.Username, "review", "inventory_stocktake", item.ID, item.StocktakeNo, clientIP(r))
 		return nil
 	})
-	a.respondMutation(w, err, item, "inventory.stocktake.reviewed")
+	a.respondMutation(w, err, item, topic)
+}
+
+func publishInventoryStocktakeReviewWorkflow(data *AppData, item InventoryStocktake, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "inventory_stocktake.review_requested",
+		Source:     "inventory",
+		Resource:   "inventory_stocktake",
+		ResourceID: item.ID,
+		ResourceNo: item.StocktakeNo,
+		Title:      "库存盘点复核 " + item.StocktakeNo,
+		Actor:      actor,
+		Reason:     fallback(item.Remark, "库存盘点复核"),
+		Variables: map[string]string{
+			"siteId":     fmt.Sprintf("%d", item.SiteID),
+			"materialId": fmt.Sprintf("%d", item.MaterialID),
+			"bookQty":    fmt.Sprintf("%.2f", item.BookQty),
+			"actualQty":  fmt.Sprintf("%.2f", item.ActualQty),
+			"diffQty":    fmt.Sprintf("%.2f", item.DiffQty),
+			"unit":       item.Unit,
+		},
+	})
+}
+
+func applyInventoryStocktakeReviewLocked(data *AppData, id int64) (InventoryStocktake, error) {
+	idx := inventoryStocktakeIndex(*data, id)
+	if idx < 0 {
+		return InventoryStocktake{}, fmt.Errorf("盘点单不存在")
+	}
+	if data.InventoryStocktakes[idx].Status == "completed" {
+		return data.InventoryStocktakes[idx], nil
+	}
+	item := data.InventoryStocktakes[idx]
+	if !setInventoryQuantity(data, item.SiteID, item.MaterialID, item.ActualQty) {
+		return InventoryStocktake{}, fmt.Errorf("库存不存在")
+	}
+	direction := "in"
+	quantity := item.DiffQty
+	if quantity < 0 {
+		direction = "out"
+		quantity = -quantity
+	}
+	if quantity > 0 {
+		flowID := nextID(data, "inventoryFlow")
+		data.InventoryFlows = append(data.InventoryFlows, InventoryFlow{
+			ID: flowID, FlowNo: number("IF", flowID), SiteID: item.SiteID, MaterialID: item.MaterialID,
+			SourceType: "inventory_stocktake", SourceID: item.ID, Direction: direction, Quantity: round(quantity),
+			BalanceQty: item.ActualQty, Remark: "库存盘点调整", CreatedAt: nowString(),
+		})
+	}
+	data.InventoryStocktakes[idx].Status = "completed"
+	data.InventoryStocktakes[idx].ReviewedAt = nowString()
+	return data.InventoryStocktakes[idx], nil
+}
+
+func inventoryStocktakeIndex(data AppData, id int64) int {
+	for i := range data.InventoryStocktakes {
+		if data.InventoryStocktakes[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func inventoryBalance(data AppData, siteID, materialID int64) float64 {

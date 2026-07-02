@@ -63,6 +63,9 @@ func (s *PostgresStore) Load() error {
 			if ensureEnterpriseDefaults(&s.data) {
 				changed = true
 			}
+			if ensureWorkflowDefaults(&s.data) {
+				changed = true
+			}
 			if changed {
 				return s.saveLocked(ctx)
 			}
@@ -83,13 +86,17 @@ func (s *PostgresStore) Load() error {
 			if ensureEnterpriseDefaults(&s.data) {
 				changed = true
 			}
+			if ensureWorkflowDefaults(&s.data) {
+				changed = true
+			}
 			if changed {
 				return s.saveLocked(ctx)
 			}
 			return nil
 		}
-		s.data = SeedData()
+		s.data = initialStoreData()
 		ensureEnterpriseDefaults(&s.data)
+		ensureWorkflowDefaults(&s.data)
 		return s.saveLocked(ctx)
 	}
 	if err != nil {
@@ -115,6 +122,9 @@ func (s *PostgresStore) Load() error {
 	}
 	changed := ensureSeedCredentials(&s.data)
 	if ensureEnterpriseDefaults(&s.data) {
+		changed = true
+	}
+	if ensureWorkflowDefaults(&s.data) {
 		changed = true
 	}
 	if changed {

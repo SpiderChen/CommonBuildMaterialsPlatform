@@ -44,8 +44,8 @@ func (a *App) createProduct(w http.ResponseWriter, r *http.Request, session Sess
 		if strings.TrimSpace(item.Name) == "" {
 			return fmt.Errorf("产品名称不能为空")
 		}
-		item.Line = fallback(item.Line, "concrete")
-		item.Unit = fallback(item.Unit, "m3")
+		item.Line = fallback(item.Line, "asphalt")
+		item.Unit = fallback(item.Unit, "t")
 		item.ID = nextID(data, "product")
 		item.Status = fallback(item.Status, "active")
 		data.Products = append(data.Products, item)
@@ -114,6 +114,69 @@ func (a *App) createCarrier(w http.ResponseWriter, r *http.Request, session Sess
 	a.respondMutation(w, err, item, "master.carrier.created")
 }
 
+type vehicleDevicePayload struct {
+	VehicleDevice
+}
+
+func readVehicleDevicePayload(r *http.Request) (VehicleDevice, error) {
+	var payload vehicleDevicePayload
+	if err := readJSON(r, &payload); err != nil {
+		return VehicleDevice{}, err
+	}
+	payload.DeviceNo = strings.TrimSpace(payload.DeviceNo)
+	payload.Protocol = fallback(strings.TrimSpace(payload.Protocol), "gps-forwarder")
+	payload.Vendor = fallback(strings.TrimSpace(payload.Vendor), "GPS 转发器")
+	payload.Status = fallback(strings.TrimSpace(payload.Status), "active")
+	return payload.VehicleDevice, nil
+}
+
+func nextVehicleDeviceID(data *AppData) int64 {
+	if data.Next == nil {
+		data.Next = map[string]int64{}
+	}
+	if data.Next["vehicleDevice"] == 0 {
+		for _, item := range data.VehicleDevices {
+			if item.ID > data.Next["vehicleDevice"] {
+				data.Next["vehicleDevice"] = item.ID
+			}
+		}
+	}
+	return nextID(data, "vehicleDevice")
+}
+
+func (a *App) createVehicleDevice(w http.ResponseWriter, r *http.Request, session Session) {
+	item, err := readVehicleDevicePayload(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid vehicle device")
+		return
+	}
+	err = a.store.Mutate(func(data *AppData) error {
+		if strings.TrimSpace(item.DeviceNo) == "" {
+			return fmt.Errorf("设备号不能为空")
+		}
+		vehicle, ok := findVehicle(*data, item.VehicleID)
+		if !ok {
+			return fmt.Errorf("车辆不存在")
+		}
+		if _, err := writableSiteID(*data, session.User, vehicle.SiteID); err != nil {
+			return err
+		}
+		for _, existing := range data.VehicleDevices {
+			if existing.DeviceNo == item.DeviceNo {
+				return fmt.Errorf("设备号已绑定车辆")
+			}
+			if existing.VehicleID == item.VehicleID {
+				return fmt.Errorf("车辆已绑定定位设备")
+			}
+		}
+		item.ID = nextVehicleDeviceID(data)
+		data.VehicleDevices = append(data.VehicleDevices, item)
+		addAudit(data, session.User.Username, "create", "vehicle_device", item.ID, item.DeviceNo, clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, item, "master.vehicle_device.created")
+}
+
 func (a *App) createSite(w http.ResponseWriter, r *http.Request, session Session) {
 	var item Site
 	if err := readJSON(r, &item); err != nil {
@@ -122,21 +185,51 @@ func (a *App) createSite(w http.ResponseWriter, r *http.Request, session Session
 	}
 	err := a.store.Mutate(func(data *AppData) error {
 		if item.CompanyID == 0 {
-			item.CompanyID = 1
+			return fmt.Errorf("站点必须绑定公司")
 		}
 		if !companyIDExists(data.Companies, item.CompanyID) {
 			return fmt.Errorf("公司不存在")
+		}
+		if !userCanManageCompany(*data, session.User, item.CompanyID) {
+			return fmt.Errorf("无权维护该公司站点")
 		}
 		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Code) == "" {
 			return fmt.Errorf("站点名称和编码不能为空")
 		}
 		item.ID = nextID(data, "site")
-		item.Status = fallback(item.Status, "running")
+		item.Status = fallback(item.Status, "active")
 		data.Sites = append(data.Sites, item)
+		syncSiteGeoFence(data, item)
 		addAudit(data, session.User.Username, "create", "site", item.ID, item.Name, clientIP(r))
 		return nil
 	})
 	a.respondMutation(w, err, item, "master.site.created")
+}
+
+func (a *App) createPlant(w http.ResponseWriter, r *http.Request, session Session) {
+	var item Plant
+	if err := readJSON(r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid plant")
+		return
+	}
+	err := a.store.Mutate(func(data *AppData) error {
+		var err error
+		item.SiteID, err = writableSiteID(*data, session.User, item.SiteID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Code) == "" {
+			return fmt.Errorf("生产线名称和编码不能为空")
+		}
+		item.Capacity = fallback(item.Capacity, "0")
+		item.Interface = ""
+		item.ID = nextID(data, "plant")
+		item.Status = fallback(item.Status, "running")
+		data.Plants = append(data.Plants, item)
+		addAudit(data, session.User.Username, "create", "plant", item.ID, item.Name, clientIP(r))
+		return nil
+	})
+	a.respondMutation(w, err, item, "master.plant.created")
 }
 
 func (a *App) createInventoryItem(w http.ResponseWriter, r *http.Request, session Session) {
@@ -146,16 +239,15 @@ func (a *App) createInventoryItem(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	err := a.store.Mutate(func(data *AppData) error {
-		if item.SiteID == 0 {
-			return fmt.Errorf("库存必须关联站点")
-		}
-		if _, ok := findSite(*data, item.SiteID); !ok {
-			return fmt.Errorf("站点不存在")
+		var err error
+		item.SiteID, err = writableSiteID(*data, session.User, item.SiteID)
+		if err != nil {
+			return err
 		}
 		if item.MaterialID == 0 {
 			return fmt.Errorf("库存必须关联物料")
 		}
-		material, ok := findMaterial(*data, item.MaterialID)
+		material, ok := scopedMaterial(*data, session.User, item.MaterialID)
 		if !ok {
 			return fmt.Errorf("物料不存在")
 		}

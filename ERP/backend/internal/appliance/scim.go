@@ -54,21 +54,103 @@ func (a *App) systemSCIM(w http.ResponseWriter, r *http.Request, session Session
 		}
 		_ = readJSON(r, &req)
 		var updated SCIMProvider
+		topic := "system.scim.status"
 		err := a.store.Mutate(func(data *AppData) error {
 			for i := range data.SCIMProviders {
 				if data.SCIMProviders[i].ID == id {
-					data.SCIMProviders[i].Status = fallback(req.Status, "enabled")
-					updated = publicSCIMProvider(data.SCIMProviders[i])
+					status := fallback(strings.TrimSpace(req.Status), "enabled")
+					if hasPendingWorkflowForResource(*data, "scim_provider", id) {
+						updated = publicSCIMProvider(data.SCIMProviders[i])
+						topic = "system.scim.status_requested"
+						return nil
+					}
+					_, instances, err := publishSCIMProviderStatusWorkflow(data, data.SCIMProviders[i], status, session.User.Username)
+					if err != nil {
+						return err
+					}
+					if len(instances) > 0 {
+						updated = publicSCIMProvider(data.SCIMProviders[i])
+						topic = "system.scim.status_requested"
+						addAudit(data, session.User.Username, "request_status", "scim_provider", id, data.SCIMProviders[i].Code+"/"+status, clientIP(r))
+						return nil
+					}
+					next, err := applySCIMProviderStatusLocked(data, id, status)
+					if err != nil {
+						return err
+					}
+					updated = publicSCIMProvider(next)
 					addAudit(data, session.User.Username, "status", "scim_provider", id, updated.Code+"/"+updated.Status, clientIP(r))
 					return nil
 				}
 			}
 			return fmt.Errorf("SCIM 提供商不存在")
 		})
-		a.respondMutation(w, err, updated, "system.scim.status")
+		a.respondMutation(w, err, updated, topic)
+		return
+	}
+	if len(parts) == 2 && parts[0] == "providers" && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(parts[1], 10, 64)
+		var deleted SCIMProvider
+		err := a.store.Mutate(func(data *AppData) error {
+			for i, item := range data.SCIMProviders {
+				if item.ID != id {
+					continue
+				}
+				if item.Status == "enabled" {
+					return fmt.Errorf("启用中的 SCIM 提供商不能删除，请先停用")
+				}
+				if hasPendingWorkflowForResource(*data, "scim_provider", id) {
+					return fmt.Errorf("SCIM 提供商存在待审批状态变更，不能删除")
+				}
+				deleted = publicSCIMProvider(item)
+				data.SCIMProviders = append(data.SCIMProviders[:i], data.SCIMProviders[i+1:]...)
+				addAudit(data, session.User.Username, "delete", "scim_provider", id, item.Code, clientIP(r))
+				return nil
+			}
+			return fmt.Errorf("SCIM 提供商不存在")
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emit("system.scim.provider.deleted", deleted)
+		writeJSON(w, http.StatusOK, deleted)
 		return
 	}
 	writeError(w, http.StatusNotFound, "unknown scim system route")
+}
+
+func publishSCIMProviderStatusWorkflow(data *AppData, item SCIMProvider, targetStatus string, actor string) (WorkflowEvent, []WorkflowInstance, error) {
+	return publishWorkflowEvent(data, workflowEventRequest{
+		EventType:  "scim_provider.status_change_requested",
+		Source:     "system",
+		Resource:   "scim_provider",
+		ResourceID: item.ID,
+		ResourceNo: item.Code,
+		Title:      "SCIM 提供商状态变更 " + item.Code,
+		Actor:      actor,
+		Reason:     "SCIM 提供商状态变更审批",
+		Variables: map[string]string{
+			"targetStatus":    targetStatus,
+			"currentStatus":   item.Status,
+			"code":            item.Code,
+			"name":            item.Name,
+			"defaultRoleCode": item.DefaultRoleCode,
+			"companyId":       fmt.Sprintf("%d", item.CompanyID),
+			"siteId":          fmt.Sprintf("%d", item.SiteID),
+		},
+	})
+}
+
+func applySCIMProviderStatusLocked(data *AppData, id int64, status string) (SCIMProvider, error) {
+	status = fallback(strings.TrimSpace(status), "enabled")
+	for i := range data.SCIMProviders {
+		if data.SCIMProviders[i].ID == id {
+			data.SCIMProviders[i].Status = status
+			return data.SCIMProviders[i], nil
+		}
+	}
+	return SCIMProvider{}, fmt.Errorf("SCIM 提供商不存在")
 }
 
 func (a *App) upsertSCIMProvider(w http.ResponseWriter, r *http.Request, session Session) {

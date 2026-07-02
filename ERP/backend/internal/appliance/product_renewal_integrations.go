@@ -1,3 +1,5 @@
+//go:build legacy_product_ops
+
 package appliance
 
 import (
@@ -97,6 +99,12 @@ func normalizeProductRenewalIntegration(req ProductRenewalIntegration, actor str
 	req.Secret = strings.TrimSpace(req.Secret)
 	req.Status = fallback(strings.ToLower(strings.TrimSpace(req.Status)), "active")
 	req.Remark = strings.TrimSpace(req.Remark)
+	if err := validateNoMockEndpoint(req.Endpoint, "续费外部集成 endpoint"); err != nil {
+		return req, err
+	}
+	if req.Status == "active" && req.Endpoint == "" {
+		return req, fmt.Errorf("启用续费外部集成必须配置真实 endpoint")
+	}
 	if req.Name == "" {
 		return req, fmt.Errorf("续费外部集成名称不能为空")
 	}
@@ -230,7 +238,17 @@ func deliverProductRenewalSyncRecord(data *AppData, record *ProductRenewalSyncRe
 	}
 	record.Status = "succeeded"
 	record.ExternalStatus = fallback(status, productRenewalExternalStatus(record.Scenario, record.Action))
-	record.ExternalRequestID = fallback(record.ExternalRequestID, strings.ToLower(integration.Code)+"-"+record.SyncNo)
+	responseRequestID := productRenewalCallbackString(response, "externalRequestId", "externalRequestID", "requestId", "requestID", "request_id", "taxRequestId", "taxSerialNo", "serialNo")
+	if record.Scenario == "tax" && strings.TrimSpace(responseRequestID) == "" {
+		record.Status = "failed"
+		record.Error = "税控集成未返回外部请求号"
+		record.ExternalStatus = status
+		record.ResponsePayload = response
+		record.NextRetryAt = addMinutesString(now, 5*record.AttemptCount)
+		updateProductRenewalIntegrationState(data, record.IntegrationID, "", record.Error)
+		return
+	}
+	record.ExternalRequestID = fallback(record.ExternalRequestID, responseRequestID)
 	record.ResponsePayload = response
 	record.Error = ""
 	record.NextRetryAt = ""
@@ -256,18 +274,8 @@ func currentProductRenewalIntegration(data AppData, record ProductRenewalSyncRec
 
 func postProductRenewalIntegrationPayload(integration ProductRenewalIntegration, record ProductRenewalSyncRecord) (string, string, error) {
 	endpoint := strings.TrimSpace(integration.Endpoint)
-	switch endpoint {
-	case "mock://success":
-		status := productRenewalExternalStatus(record.Scenario, record.Action)
-		response := map[string]string{
-			"externalRequestId": strings.ToLower(integration.Code) + "-" + record.SyncNo,
-			"externalStatus":    status,
-			"provider":          integration.Provider,
-		}
-		raw, _ := json.Marshal(response)
-		return status, string(raw), nil
-	case "mock://fail":
-		return "rejected", `{"error":"mock renewal integration failed"}`, fmt.Errorf("mock renewal integration failed")
+	if err := validateNoMockEndpoint(endpoint, "续费外部集成 endpoint"); err != nil {
+		return "", "", err
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
@@ -383,11 +391,10 @@ func applyProductRenewalSyncSideEffects(data *AppData, record ProductRenewalSync
 					data.ProductRenewalESigns[i].Status = "signed"
 					data.ProductRenewalESigns[i].SignedAt = fallback(data.ProductRenewalESigns[i].SignedAt, nowString())
 					data.ProductRenewalESigns[i].Signature = fallback(data.ProductRenewalESigns[i].Signature, productRenewalCallbackString(record.ResponsePayload, "signature"))
-					data.ProductRenewalESigns[i].Signature = fallback(data.ProductRenewalESigns[i].Signature, data.ProductRenewalESigns[i].Signer+" 电子签名")
 				} else if data.ProductRenewalESigns[i].Status == "" || data.ProductRenewalESigns[i].Status == "failed" {
 					data.ProductRenewalESigns[i].Status = "sent"
 				}
-				data.ProductRenewalESigns[i].LinkURL = fallback(data.ProductRenewalESigns[i].LinkURL, "/public/renewal-sign/"+data.ProductRenewalESigns[i].SignNo)
+				data.ProductRenewalESigns[i].LinkURL = fallback(data.ProductRenewalESigns[i].LinkURL, productRenewalCallbackString(record.ResponsePayload, "linkUrl", "linkURL", "signUrl", "signURL", "url"))
 			} else if record.Status == "failed" {
 				data.ProductRenewalESigns[i].Status = "failed"
 			}
@@ -403,7 +410,6 @@ func applyProductRenewalSyncSideEffects(data *AppData, record ProductRenewalSync
 				data.ProductRenewalInvoices[i].TaxStatus = "accepted"
 				data.ProductRenewalInvoices[i].ExternalRequest = fallback(record.ExternalRequestID, data.ProductRenewalInvoices[i].ExternalRequest)
 				data.ProductRenewalInvoices[i].FileURL = fallback(productRenewalCallbackString(record.ResponsePayload, "fileUrl", "fileURL", "downloadUrl", "pdfUrl"), data.ProductRenewalInvoices[i].FileURL)
-				data.ProductRenewalInvoices[i].FileURL = fallback(data.ProductRenewalInvoices[i].FileURL, "renewal-invoice://"+data.ProductRenewalInvoices[i].InvoiceNo+".pdf")
 			} else if record.Status == "failed" {
 				data.ProductRenewalInvoices[i].TaxStatus = "failed"
 				data.ProductRenewalInvoices[i].ExternalRequest = fallback(record.ExternalRequestID, data.ProductRenewalInvoices[i].ExternalRequest)

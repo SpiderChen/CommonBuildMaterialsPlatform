@@ -662,23 +662,36 @@ type Tenant struct {
 	Status string `json:"status"`
 }
 
+type GroupProfile struct {
+	Name                  string `json:"name"`
+	Code                  string `json:"code"`
+	Edition               string `json:"edition"`
+	HeadquartersCompanyID int64  `json:"headquartersCompanyId"`
+	OperatingMode         string `json:"operatingMode"`
+	DataArchitecture      string `json:"dataArchitecture"`
+}
+
 type Company struct {
 	ID       int64  `json:"id"`
 	TenantID int64  `json:"tenantId,omitempty"`
 	Name     string `json:"name"`
 	Code     string `json:"code"`
+	ParentID int64  `json:"parentId"`
+	Level    string `json:"level"`
+	Region   string `json:"region"`
 	Status   string `json:"status"`
 }
 
 type Site struct {
-	ID        int64   `json:"id"`
-	CompanyID int64   `json:"companyId"`
-	Name      string  `json:"name"`
-	Code      string  `json:"code"`
-	Address   string  `json:"address"`
-	Longitude float64 `json:"longitude"`
-	Latitude  float64 `json:"latitude"`
-	Status    string  `json:"status"`
+	ID          int64   `json:"id"`
+	CompanyID   int64   `json:"companyId"`
+	Name        string  `json:"name"`
+	Code        string  `json:"code"`
+	Address     string  `json:"address"`
+	Longitude   float64 `json:"longitude"`
+	Latitude    float64 `json:"latitude"`
+	FenceRadius float64 `json:"fenceRadius"`
+	Status      string  `json:"status"`
 }
 
 type Department struct {
@@ -691,13 +704,68 @@ type Department struct {
 }
 
 type Plant struct {
-	ID        int64  `json:"id"`
-	SiteID    int64  `json:"siteId"`
-	Name      string `json:"name"`
-	Code      string `json:"code"`
-	Capacity  string `json:"capacity"`
-	Interface string `json:"interface"`
-	Status    string `json:"status"`
+	ID              int64  `json:"id"`
+	SiteID          int64  `json:"siteId"`
+	Name            string `json:"name"`
+	Code            string `json:"code"`
+	Capacity        string `json:"capacity"`
+	Interface       string `json:"interface,omitempty"`
+	Status          string `json:"status"`
+	GatewayStatus   string `json:"gatewayStatus,omitempty"`
+	GatewayDeviceNo string `json:"gatewayDeviceNo,omitempty"`
+	GatewayChannel  string `json:"gatewayChannel,omitempty"`
+	GatewayProtocol string `json:"gatewayProtocol,omitempty"`
+	LastFrameAt     string `json:"lastFrameAt,omitempty"`
+	LastFrameStatus string `json:"lastFrameStatus,omitempty"`
+	GatewayError    string `json:"gatewayError,omitempty"`
+}
+
+type PlantBufferLocation struct {
+	ID                 int64   `json:"id"`
+	SiteID             int64   `json:"siteId"`
+	PlantID            int64   `json:"plantId"`
+	PlantCode          string  `json:"plantCode"`
+	Code               string  `json:"code"`
+	Name               string  `json:"name"`
+	Type               string  `json:"type"`
+	MaterialID         int64   `json:"materialId"`
+	AllowedMaterialIDs []int64 `json:"allowedMaterialIds,omitempty"`
+	Capacity           float64 `json:"capacity"`
+	Unit               string  `json:"unit"`
+	CurrentQty         float64 `json:"currentQty"`
+	WarningQty         float64 `json:"warningQty"`
+	MoistureRate       float64 `json:"moistureRate"`
+	QualityStatus      string  `json:"qualityStatus"`
+	Status             string  `json:"status"`
+	GatewayDeviceNo    string  `json:"gatewayDeviceNo,omitempty"`
+	GatewayChannel     string  `json:"gatewayChannel,omitempty"`
+	GatewayProtocol    string  `json:"gatewayProtocol,omitempty"`
+	LastReportedAt     string  `json:"lastReportedAt,omitempty"`
+	LastFrameStatus    string  `json:"lastFrameStatus,omitempty"`
+	GatewayError       string  `json:"gatewayError,omitempty"`
+	CreatedAt          string  `json:"createdAt"`
+	UpdatedAt          string  `json:"updatedAt"`
+}
+
+type PlantBufferFlow struct {
+	ID            int64   `json:"id"`
+	FlowNo        string  `json:"flowNo"`
+	SiteID        int64   `json:"siteId"`
+	PlantID       int64   `json:"plantId"`
+	BufferID      int64   `json:"bufferId"`
+	BufferCode    string  `json:"bufferCode"`
+	MaterialID    int64   `json:"materialId"`
+	SourceType    string  `json:"sourceType"`
+	SourceID      int64   `json:"sourceId"`
+	Direction     string  `json:"direction"`
+	Quantity      float64 `json:"quantity"`
+	BalanceQty    float64 `json:"balanceQty"`
+	Unit          string  `json:"unit"`
+	MoistureRate  float64 `json:"moistureRate"`
+	QualityStatus string  `json:"qualityStatus"`
+	Actor         string  `json:"actor"`
+	Remark        string  `json:"remark"`
+	CreatedAt     string  `json:"createdAt"`
 }
 
 type Warehouse struct {
@@ -870,6 +938,7 @@ type Material struct {
 
 type Vehicle struct {
 	ID             int64  `json:"id"`
+	InternalNo     string `json:"internalNo"`
 	PlateNo        string `json:"plateNo"`
 	VehicleType    string `json:"vehicleType"`
 	Capacity       string `json:"capacity"`
@@ -986,7 +1055,11 @@ type ProductionPlan struct {
 	PlanNo          string  `json:"planNo"`
 	OrderID         int64   `json:"orderId"`
 	SiteID          int64   `json:"siteId"`
+	PlantID         int64   `json:"plantId"`
+	PlantCode       string  `json:"plantCode"`
 	ProductID       int64   `json:"productId"`
+	MixDesignID     int64   `json:"mixDesignId"`
+	MixProfileID    int64   `json:"mixProfileId"`
 	PlanQuantity    float64 `json:"planQuantity"`
 	ProducedQty     float64 `json:"producedQty"`
 	PlanDate        string  `json:"planDate"`
@@ -995,6 +1068,40 @@ type ProductionPlan struct {
 	InventoryStatus string  `json:"inventoryStatus"`
 	RecipeStatus    string  `json:"recipeStatus"`
 	Status          string  `json:"status"`
+	PlannedTaskQty  float64 `json:"plannedTaskQty"`
+	RemainingQty    float64 `json:"remainingQty"`
+	Progress        float64 `json:"progress"`
+	RiskReason      string  `json:"riskReason"`
+	CreatedAt       string  `json:"createdAt"`
+	UpdatedAt       string  `json:"updatedAt"`
+}
+
+type ProductionOverviewKPI struct {
+	PlanCount         int     `json:"planCount"`
+	ActivePlanCount   int     `json:"activePlanCount"`
+	TaskCount         int     `json:"taskCount"`
+	RunningTaskCount  int     `json:"runningTaskCount"`
+	BatchCount        int     `json:"batchCount"`
+	ScheduledQty      float64 `json:"scheduledQty"`
+	ProducedQty       float64 `json:"producedQty"`
+	RemainingQty      float64 `json:"remainingQty"`
+	TodayPlannedQty   float64 `json:"todayPlannedQty"`
+	TodayProducedQty  float64 `json:"todayProducedQty"`
+	CapacityWarnings  int     `json:"capacityWarnings"`
+	InventoryWarnings int     `json:"inventoryWarnings"`
+}
+
+type ProductionPlanSummary struct {
+	PlanDate     string  `json:"planDate"`
+	SiteID       int64   `json:"siteId"`
+	PlanCount    int     `json:"planCount"`
+	TaskCount    int     `json:"taskCount"`
+	BatchCount   int     `json:"batchCount"`
+	PlannedQty   float64 `json:"plannedQty"`
+	ProducedQty  float64 `json:"producedQty"`
+	RemainingQty float64 `json:"remainingQty"`
+	Status       string  `json:"status"`
+	RiskReason   string  `json:"riskReason"`
 }
 
 type MixDesign struct {
@@ -1024,6 +1131,42 @@ type MixDesignMaterial struct {
 	MaterialID int64   `json:"materialId"`
 	Dosage     float64 `json:"dosage"`
 	Unit       string  `json:"unit"`
+	BufferID   int64   `json:"bufferId,omitempty"`
+	BufferCode string  `json:"bufferCode,omitempty"`
+}
+
+type MixDesignPlantProfile struct {
+	ID            int64                           `json:"id"`
+	MixDesignID   int64                           `json:"mixDesignId"`
+	ProductID     int64                           `json:"productId"`
+	SiteID        int64                           `json:"siteId"`
+	PlantID       int64                           `json:"plantId"`
+	PlantCode     string                          `json:"plantCode"`
+	Code          string                          `json:"code"`
+	Version       string                          `json:"version"`
+	Scope         string                          `json:"scope"`
+	Status        string                          `json:"status"`
+	IsCurrent     bool                            `json:"isCurrent"`
+	EffectiveFrom string                          `json:"effectiveFrom"`
+	EffectiveTo   string                          `json:"effectiveTo"`
+	ApprovedBy    string                          `json:"approvedBy"`
+	ApprovedAt    string                          `json:"approvedAt"`
+	RetiredAt     string                          `json:"retiredAt"`
+	CreatedBy     string                          `json:"createdBy"`
+	CreatedAt     string                          `json:"createdAt"`
+	UpdatedAt     string                          `json:"updatedAt"`
+	Materials     []MixDesignPlantProfileMaterial `json:"materials"`
+	Remark        string                          `json:"remark"`
+}
+
+type MixDesignPlantProfileMaterial struct {
+	MaterialID int64   `json:"materialId"`
+	Dosage     float64 `json:"dosage"`
+	Adjustment float64 `json:"adjustment"`
+	Unit       string  `json:"unit"`
+	BufferID   int64   `json:"bufferId"`
+	BufferCode string  `json:"bufferCode"`
+	Remark     string  `json:"remark"`
 }
 
 type MixDesignTrialRun struct {
@@ -1151,20 +1294,23 @@ type LaboratoryKPI struct {
 }
 
 type ProductionTask struct {
-	ID          int64   `json:"id"`
-	TaskNo      string  `json:"taskNo"`
-	PlanID      int64   `json:"planId"`
-	OrderID     int64   `json:"orderId"`
-	SiteID      int64   `json:"siteId"`
-	ProductID   int64   `json:"productId"`
-	MixDesignID int64   `json:"mixDesignId"`
-	PlanQty     float64 `json:"planQty"`
-	ProducedQty float64 `json:"producedQty"`
-	Status      string  `json:"status"`
-	StartedAt   string  `json:"startedAt"`
-	CompletedAt string  `json:"completedAt"`
-	CreatedAt   string  `json:"createdAt"`
-	UpdatedAt   string  `json:"updatedAt"`
+	ID           int64   `json:"id"`
+	TaskNo       string  `json:"taskNo"`
+	PlanID       int64   `json:"planId"`
+	OrderID      int64   `json:"orderId"`
+	SiteID       int64   `json:"siteId"`
+	PlantID      int64   `json:"plantId"`
+	PlantCode    string  `json:"plantCode"`
+	ProductID    int64   `json:"productId"`
+	MixDesignID  int64   `json:"mixDesignId"`
+	MixProfileID int64   `json:"mixProfileId"`
+	PlanQty      float64 `json:"planQty"`
+	ProducedQty  float64 `json:"producedQty"`
+	Status       string  `json:"status"`
+	StartedAt    string  `json:"startedAt"`
+	CompletedAt  string  `json:"completedAt"`
+	CreatedAt    string  `json:"createdAt"`
+	UpdatedAt    string  `json:"updatedAt"`
 }
 
 type ProductionBatch struct {
@@ -1174,8 +1320,10 @@ type ProductionBatch struct {
 	PlanID        int64   `json:"planId"`
 	OrderID       int64   `json:"orderId"`
 	SiteID        int64   `json:"siteId"`
+	PlantID       int64   `json:"plantId"`
 	ProductID     int64   `json:"productId"`
 	MixDesignID   int64   `json:"mixDesignId"`
+	MixProfileID  int64   `json:"mixProfileId"`
 	Quantity      float64 `json:"quantity"`
 	PlantCode     string  `json:"plantCode"`
 	Operator      string  `json:"operator"`
@@ -1310,6 +1458,70 @@ type RawMaterialReceipt struct {
 	QualityStatus   string  `json:"qualityStatus"`
 	Status          string  `json:"status"`
 	CreatedAt       string  `json:"createdAt"`
+}
+
+type StockYard struct {
+	ID              int64   `json:"id"`
+	SiteID          int64   `json:"siteId"`
+	Code            string  `json:"code"`
+	Name            string  `json:"name"`
+	Type            string  `json:"type"`
+	Area            string  `json:"area"`
+	Capacity        float64 `json:"capacity"`
+	Unit            string  `json:"unit"`
+	Status          string  `json:"status"`
+	GatewayDeviceNo string  `json:"gatewayDeviceNo,omitempty"`
+	LastReportedAt  string  `json:"lastReportedAt,omitempty"`
+	CreatedAt       string  `json:"createdAt"`
+	UpdatedAt       string  `json:"updatedAt"`
+}
+
+type StockYardPile struct {
+	ID              int64   `json:"id"`
+	SiteID          int64   `json:"siteId"`
+	YardID          int64   `json:"yardId"`
+	YardCode        string  `json:"yardCode"`
+	Code            string  `json:"code"`
+	Name            string  `json:"name"`
+	MaterialID      int64   `json:"materialId"`
+	SupplierID      int64   `json:"supplierId"`
+	BatchNo         string  `json:"batchNo"`
+	Capacity        float64 `json:"capacity"`
+	Unit            string  `json:"unit"`
+	CurrentQty      float64 `json:"currentQty"`
+	WarningQty      float64 `json:"warningQty"`
+	MoistureRate    float64 `json:"moistureRate"`
+	QualityStatus   string  `json:"qualityStatus"`
+	Status          string  `json:"status"`
+	GatewayDeviceNo string  `json:"gatewayDeviceNo,omitempty"`
+	GatewayChannel  string  `json:"gatewayChannel,omitempty"`
+	GatewayProtocol string  `json:"gatewayProtocol,omitempty"`
+	LastReportedAt  string  `json:"lastReportedAt,omitempty"`
+	LastFrameStatus string  `json:"lastFrameStatus,omitempty"`
+	GatewayError    string  `json:"gatewayError,omitempty"`
+	CreatedAt       string  `json:"createdAt"`
+	UpdatedAt       string  `json:"updatedAt"`
+}
+
+type StockYardFlow struct {
+	ID            int64   `json:"id"`
+	FlowNo        string  `json:"flowNo"`
+	SiteID        int64   `json:"siteId"`
+	YardID        int64   `json:"yardId"`
+	PileID        int64   `json:"pileId"`
+	PileCode      string  `json:"pileCode"`
+	MaterialID    int64   `json:"materialId"`
+	SourceType    string  `json:"sourceType"`
+	SourceID      int64   `json:"sourceId"`
+	Direction     string  `json:"direction"`
+	Quantity      float64 `json:"quantity"`
+	BalanceQty    float64 `json:"balanceQty"`
+	Unit          string  `json:"unit"`
+	MoistureRate  float64 `json:"moistureRate"`
+	QualityStatus string  `json:"qualityStatus"`
+	Actor         string  `json:"actor"`
+	Remark        string  `json:"remark"`
+	CreatedAt     string  `json:"createdAt"`
 }
 
 type InventoryFlow struct {
@@ -1658,27 +1870,30 @@ type TicketVoidLog struct {
 }
 
 type DeliverySign struct {
-	ID          int64   `json:"id"`
-	SignNo      string  `json:"signNo"`
-	DispatchID  int64   `json:"dispatchId"`
-	LinkID      int64   `json:"linkId"`
-	TicketID    int64   `json:"ticketId"`
-	OrderID     int64   `json:"orderId"`
-	LineID      int64   `json:"lineId"`
-	LineSeq     int     `json:"lineSeq"`
-	ProductID   int64   `json:"productId"`
-	ProductName string  `json:"productName"`
-	CustomerID  int64   `json:"customerId"`
-	ProjectID   int64   `json:"projectId"`
-	Signer      string  `json:"signer"`
-	Phone       string  `json:"phone"`
-	SignedQty   float64 `json:"signedQty"`
-	Longitude   float64 `json:"longitude"`
-	Latitude    float64 `json:"latitude"`
-	Photo       string  `json:"photo"`
-	Signature   string  `json:"signature"`
-	Remark      string  `json:"remark"`
-	SignedAt    string  `json:"signedAt"`
+	ID           int64   `json:"id"`
+	SignNo       string  `json:"signNo"`
+	DispatchID   int64   `json:"dispatchId"`
+	LinkID       int64   `json:"linkId"`
+	TicketID     int64   `json:"ticketId"`
+	OrderID      int64   `json:"orderId"`
+	LineID       int64   `json:"lineId"`
+	LineSeq      int     `json:"lineSeq"`
+	ProductID    int64   `json:"productId"`
+	ProductName  string  `json:"productName"`
+	CustomerID   int64   `json:"customerId"`
+	ProjectID    int64   `json:"projectId"`
+	Signer       string  `json:"signer"`
+	Phone        string  `json:"phone"`
+	SignedQty    float64 `json:"signedQty"`
+	Longitude    float64 `json:"longitude"`
+	Latitude     float64 `json:"latitude"`
+	Photo        string  `json:"photo"`
+	Signature    string  `json:"signature"`
+	Remark       string  `json:"remark"`
+	ReviewStatus string  `json:"reviewStatus"`
+	ReviewedBy   string  `json:"reviewedBy"`
+	ReviewedAt   string  `json:"reviewedAt"`
+	SignedAt     string  `json:"signedAt"`
 }
 
 type DeliverySignAttachment struct {
@@ -2195,22 +2410,24 @@ type ApprovalStep struct {
 }
 
 type ApprovalTask struct {
-	ID          int64                `json:"id"`
-	TaskNo      string               `json:"taskNo"`
-	FlowCode    string               `json:"flowCode"`
-	FlowName    string               `json:"flowName"`
-	Resource    string               `json:"resource"`
-	ResourceID  int64                `json:"resourceId"`
-	ResourceNo  string               `json:"resourceNo"`
-	Title       string               `json:"title"`
-	Applicant   string               `json:"applicant"`
-	CurrentStep int                  `json:"currentStep"`
-	CurrentRole string               `json:"currentRole"`
-	Status      string               `json:"status"`
-	Reason      string               `json:"reason"`
-	CreatedAt   string               `json:"createdAt"`
-	UpdatedAt   string               `json:"updatedAt"`
-	Actions     []ApprovalTaskAction `json:"actions"`
+	ID                 int64                `json:"id"`
+	TaskNo             string               `json:"taskNo"`
+	FlowCode           string               `json:"flowCode"`
+	FlowName           string               `json:"flowName"`
+	Resource           string               `json:"resource"`
+	ResourceID         int64                `json:"resourceId"`
+	ResourceNo         string               `json:"resourceNo"`
+	Title              string               `json:"title"`
+	Applicant          string               `json:"applicant"`
+	CurrentStep        int                  `json:"currentStep"`
+	CurrentRole        string               `json:"currentRole"`
+	Status             string               `json:"status"`
+	Reason             string               `json:"reason"`
+	CreatedAt          string               `json:"createdAt"`
+	UpdatedAt          string               `json:"updatedAt"`
+	Actions            []ApprovalTaskAction `json:"actions"`
+	WorkflowInstanceID int64                `json:"workflowInstanceId,omitempty"`
+	WorkflowTaskID     int64                `json:"workflowTaskId,omitempty"`
 }
 
 type ApprovalTaskAction struct {
@@ -2221,6 +2438,260 @@ type ApprovalTaskAction struct {
 	Actor    string `json:"actor"`
 	Comment  string `json:"comment"`
 	ActedAt  string `json:"actedAt"`
+}
+
+type WorkflowDefinition struct {
+	ID       int64           `json:"id"`
+	Code     string          `json:"code"`
+	Name     string          `json:"name"`
+	Category string          `json:"category"`
+	Resource string          `json:"resource"`
+	Steps    []WorkflowStep  `json:"steps"`
+	Status   string          `json:"status"`
+	Version  int             `json:"version"`
+	Trigger  WorkflowTrigger `json:"trigger,omitempty"`
+}
+
+type WorkflowTrigger struct {
+	EventType  string              `json:"eventType,omitempty"`
+	Resource   string              `json:"resource,omitempty"`
+	Conditions []WorkflowCondition `json:"conditions,omitempty"`
+}
+
+type WorkflowCondition struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+}
+
+type WorkflowEvent struct {
+	ID                 int64             `json:"id"`
+	EventNo            string            `json:"eventNo"`
+	EventType          string            `json:"eventType"`
+	Source             string            `json:"source,omitempty"`
+	EventKey           string            `json:"eventKey,omitempty"`
+	Resource           string            `json:"resource"`
+	ResourceID         int64             `json:"resourceId"`
+	ResourceNo         string            `json:"resourceNo"`
+	Title              string            `json:"title"`
+	Actor              string            `json:"actor"`
+	Reason             string            `json:"reason"`
+	Variables          map[string]string `json:"variables,omitempty"`
+	Status             string            `json:"status"`
+	MatchedDefinitions []string          `json:"matchedDefinitions,omitempty"`
+	Error              string            `json:"error,omitempty"`
+	ReplayOfID         int64             `json:"replayOfId,omitempty"`
+	RecoveredByEventID int64             `json:"recoveredByEventId,omitempty"`
+	Resolution         string            `json:"resolution,omitempty"`
+	ResolvedBy         string            `json:"resolvedBy,omitempty"`
+	ResolvedAt         string            `json:"resolvedAt,omitempty"`
+	CreatedAt          string            `json:"createdAt"`
+}
+
+type WorkflowStep struct {
+	Seq      int    `json:"seq"`
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	RoleCode string `json:"roleCode"`
+	Action   string `json:"action"`
+	SLAHours int    `json:"slaHours,omitempty"`
+}
+
+type WorkflowInstance struct {
+	ID             int64             `json:"id"`
+	InstanceNo     string            `json:"instanceNo"`
+	DefinitionID   int64             `json:"definitionId"`
+	DefinitionCode string            `json:"definitionCode"`
+	DefinitionName string            `json:"definitionName"`
+	Category       string            `json:"category"`
+	TriggerEventID int64             `json:"triggerEventId,omitempty"`
+	Resource       string            `json:"resource"`
+	ResourceID     int64             `json:"resourceId"`
+	ResourceNo     string            `json:"resourceNo"`
+	Title          string            `json:"title"`
+	Applicant      string            `json:"applicant"`
+	CurrentTaskID  int64             `json:"currentTaskId"`
+	CurrentStep    int               `json:"currentStep"`
+	CurrentRole    string            `json:"currentRole"`
+	Status         string            `json:"status"`
+	Reason         string            `json:"reason"`
+	Variables      map[string]string `json:"variables,omitempty"`
+	CreatedAt      string            `json:"createdAt"`
+	UpdatedAt      string            `json:"updatedAt"`
+	CompletedAt    string            `json:"completedAt,omitempty"`
+	Actions        []WorkflowAction  `json:"actions"`
+}
+
+type WorkflowTask struct {
+	ID                int64  `json:"id"`
+	TaskNo            string `json:"taskNo"`
+	InstanceID        int64  `json:"instanceId"`
+	DefinitionCode    string `json:"definitionCode"`
+	Resource          string `json:"resource"`
+	ResourceID        int64  `json:"resourceId"`
+	Step              int    `json:"step"`
+	StepCode          string `json:"stepCode"`
+	StepName          string `json:"stepName"`
+	RoleCode          string `json:"roleCode"`
+	Action            string `json:"action"`
+	Status            string `json:"status"`
+	CreatedAt         string `json:"createdAt"`
+	DueAt             string `json:"dueAt,omitempty"`
+	CompletedAt       string `json:"completedAt,omitempty"`
+	EscalatedAt       string `json:"escalatedAt,omitempty"`
+	EscalatedBy       string `json:"escalatedBy,omitempty"`
+	EscalatedFromRole string `json:"escalatedFromRole,omitempty"`
+	EscalationReason  string `json:"escalationReason,omitempty"`
+}
+
+type WorkflowInboxItem struct {
+	Task     WorkflowTask     `json:"task"`
+	Instance WorkflowInstance `json:"instance"`
+	CanAct   bool             `json:"canAct"`
+	Overdue  bool             `json:"overdue"`
+}
+
+type WorkflowAction struct {
+	Seq        int    `json:"seq"`
+	TaskID     int64  `json:"taskId"`
+	Step       int    `json:"step"`
+	StepCode   string `json:"stepCode"`
+	RoleCode   string `json:"roleCode"`
+	Action     string `json:"action"`
+	Actor      string `json:"actor"`
+	Comment    string `json:"comment"`
+	ActedAt    string `json:"actedAt"`
+	FromStatus string `json:"fromStatus"`
+	ToStatus   string `json:"toStatus"`
+}
+
+type WorkflowLog struct {
+	ID             int64             `json:"id"`
+	LogNo          string            `json:"logNo"`
+	InstanceID     int64             `json:"instanceId,omitempty"`
+	InstanceNo     string            `json:"instanceNo,omitempty"`
+	TriggerEventID int64             `json:"triggerEventId,omitempty"`
+	TaskID         int64             `json:"taskId,omitempty"`
+	TaskNo         string            `json:"taskNo,omitempty"`
+	DefinitionCode string            `json:"definitionCode,omitempty"`
+	Resource       string            `json:"resource,omitempty"`
+	ResourceID     int64             `json:"resourceId,omitempty"`
+	Action         string            `json:"action"`
+	Status         string            `json:"status,omitempty"`
+	Actor          string            `json:"actor,omitempty"`
+	Message        string            `json:"message,omitempty"`
+	Variables      map[string]string `json:"variables,omitempty"`
+	CreatedAt      string            `json:"createdAt"`
+}
+
+type WorkflowOutbox struct {
+	ID             int64             `json:"id"`
+	OutboxNo       string            `json:"outboxNo"`
+	LogID          int64             `json:"logId"`
+	EventType      string            `json:"eventType"`
+	InstanceID     int64             `json:"instanceId,omitempty"`
+	InstanceNo     string            `json:"instanceNo,omitempty"`
+	TriggerEventID int64             `json:"triggerEventId,omitempty"`
+	TaskID         int64             `json:"taskId,omitempty"`
+	TaskNo         string            `json:"taskNo,omitempty"`
+	DefinitionCode string            `json:"definitionCode,omitempty"`
+	Resource       string            `json:"resource,omitempty"`
+	ResourceID     int64             `json:"resourceId,omitempty"`
+	Status         string            `json:"status"`
+	Attempts       int               `json:"attempts"`
+	LastError      string            `json:"lastError,omitempty"`
+	ClaimedBy      string            `json:"claimedBy,omitempty"`
+	ClaimedAt      string            `json:"claimedAt,omitempty"`
+	NextAttemptAt  string            `json:"nextAttemptAt,omitempty"`
+	AcknowledgedBy string            `json:"acknowledgedBy,omitempty"`
+	AcknowledgedAt string            `json:"acknowledgedAt,omitempty"`
+	Payload        map[string]string `json:"payload,omitempty"`
+	CreatedAt      string            `json:"createdAt"`
+	UpdatedAt      string            `json:"updatedAt"`
+}
+
+type WorkflowSubscription struct {
+	ID             int64  `json:"id"`
+	Code           string `json:"code"`
+	Name           string `json:"name"`
+	EventType      string `json:"eventType"`
+	Resource       string `json:"resource,omitempty"`
+	DefinitionCode string `json:"definitionCode,omitempty"`
+	TargetType     string `json:"targetType"`
+	Endpoint       string `json:"endpoint"`
+	Secret         string `json:"secret,omitempty"`
+	RetryLimit     int    `json:"retryLimit"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
+	Status         string `json:"status"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+type WorkflowDelivery struct {
+	ID               int64             `json:"id"`
+	DeliveryNo       string            `json:"deliveryNo"`
+	OutboxID         int64             `json:"outboxId"`
+	OutboxNo         string            `json:"outboxNo"`
+	SubscriptionID   int64             `json:"subscriptionId"`
+	SubscriptionCode string            `json:"subscriptionCode"`
+	SubscriptionName string            `json:"subscriptionName"`
+	EventType        string            `json:"eventType"`
+	Resource         string            `json:"resource,omitempty"`
+	ResourceID       int64             `json:"resourceId,omitempty"`
+	TargetType       string            `json:"targetType"`
+	Endpoint         string            `json:"endpoint"`
+	Status           string            `json:"status"`
+	Attempts         int               `json:"attempts"`
+	RetryLimit       int               `json:"retryLimit"`
+	Payload          map[string]string `json:"payload,omitempty"`
+	RequestPayload   string            `json:"requestPayload,omitempty"`
+	ResponseStatus   int               `json:"responseStatus,omitempty"`
+	ResponseBody     string            `json:"responseBody,omitempty"`
+	LastError        string            `json:"lastError,omitempty"`
+	LastAttemptAt    string            `json:"lastAttemptAt,omitempty"`
+	NextAttemptAt    string            `json:"nextAttemptAt,omitempty"`
+	CompletedAt      string            `json:"completedAt,omitempty"`
+	CreatedAt        string            `json:"createdAt"`
+	UpdatedAt        string            `json:"updatedAt"`
+}
+
+type WorkflowDeliveryDispatchResult struct {
+	DeliveryID     int64  `json:"deliveryId"`
+	DeliveryNo     string `json:"deliveryNo,omitempty"`
+	OutboxNo       string `json:"outboxNo,omitempty"`
+	EventType      string `json:"eventType,omitempty"`
+	Status         string `json:"status"`
+	ResponseStatus int    `json:"responseStatus,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+type WorkflowDeliveryDispatchBatch struct {
+	Total      int                              `json:"total"`
+	Recovered  int                              `json:"recovered"`
+	Dispatched int                              `json:"dispatched"`
+	Succeeded  int                              `json:"succeeded"`
+	Failed     int                              `json:"failed"`
+	Skipped    int                              `json:"skipped"`
+	Results    []WorkflowDeliveryDispatchResult `json:"results"`
+}
+
+type WorkflowTaskEscalationResult struct {
+	TaskID     int64  `json:"taskId"`
+	TaskNo     string `json:"taskNo,omitempty"`
+	InstanceID int64  `json:"instanceId,omitempty"`
+	InstanceNo string `json:"instanceNo,omitempty"`
+	FromRole   string `json:"fromRole,omitempty"`
+	ToRole     string `json:"toRole,omitempty"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+}
+
+type WorkflowAutomationRun struct {
+	Deliveries  WorkflowDeliveryDispatchBatch  `json:"deliveries"`
+	Escalated   int                            `json:"escalated"`
+	Skipped     int                            `json:"skipped"`
+	Escalations []WorkflowTaskEscalationResult `json:"escalations"`
 }
 
 type DataDictionary struct {
@@ -2465,10 +2936,13 @@ type AppData struct {
 	SCIMProviders                 []SCIMProvider                 `json:"scimProviders"`
 	SCIMEvents                    []SCIMProvisioningEvent        `json:"scimEvents"`
 	Tenants                       []Tenant                       `json:"tenants"`
+	GroupProfile                  GroupProfile                   `json:"groupProfile"`
 	Companies                     []Company                      `json:"companies"`
 	Sites                         []Site                         `json:"sites"`
 	Departments                   []Department                   `json:"departments"`
 	Plants                        []Plant                        `json:"plants"`
+	PlantBufferLocations          []PlantBufferLocation          `json:"plantBufferLocations"`
+	PlantBufferFlows              []PlantBufferFlow              `json:"plantBufferFlows"`
 	Warehouses                    []Warehouse                    `json:"warehouses"`
 	Silos                         []Silo                         `json:"silos"`
 	Customers                     []Customer                     `json:"customers"`
@@ -2496,6 +2970,7 @@ type AppData struct {
 	Orders                        []SalesOrder                   `json:"orders"`
 	ProductionPlans               []ProductionPlan               `json:"productionPlans"`
 	MixDesigns                    []MixDesign                    `json:"mixDesigns"`
+	MixDesignPlantProfiles        []MixDesignPlantProfile        `json:"mixDesignPlantProfiles"`
 	MixDesignTrialRuns            []MixDesignTrialRun            `json:"mixDesignTrialRuns"`
 	ProductionTasks               []ProductionTask               `json:"productionTasks"`
 	ProductionBatches             []ProductionBatch              `json:"productionBatches"`
@@ -2509,6 +2984,9 @@ type AppData struct {
 	LaboratoryCalibrations        []LaboratoryCalibration        `json:"laboratoryCalibrations"`
 	QualityExceptions             []QualityException             `json:"qualityExceptions"`
 	Inventory                     []InventoryItem                `json:"inventory"`
+	StockYards                    []StockYard                    `json:"stockYards"`
+	StockYardPiles                []StockYardPile                `json:"stockYardPiles"`
+	StockYardFlows                []StockYardFlow                `json:"stockYardFlows"`
 	InventoryTransfers            []InventoryTransfer            `json:"inventoryTransfers"`
 	InventoryStocktakes           []InventoryStocktake           `json:"inventoryStocktakes"`
 	InventoryBatchTraces          []InventoryBatchTrace          `json:"inventoryBatchTraces"`
@@ -2555,7 +3033,16 @@ type AppData struct {
 	IntegrationEndpoints          []IntegrationEndpoint          `json:"integrationEndpoints"`
 	ApprovalFlows                 []ApprovalFlow                 `json:"approvalFlows"`
 	ApprovalTasks                 []ApprovalTask                 `json:"approvalTasks"`
+	WorkflowDefinitions           []WorkflowDefinition           `json:"workflowDefinitions"`
+	WorkflowInstances             []WorkflowInstance             `json:"workflowInstances"`
+	WorkflowTasks                 []WorkflowTask                 `json:"workflowTasks"`
+	WorkflowEvents                []WorkflowEvent                `json:"workflowEvents"`
+	WorkflowLogs                  []WorkflowLog                  `json:"workflowLogs"`
+	WorkflowOutbox                []WorkflowOutbox               `json:"workflowOutbox"`
+	WorkflowSubscriptions         []WorkflowSubscription         `json:"workflowSubscriptions"`
+	WorkflowDeliveries            []WorkflowDelivery             `json:"workflowDeliveries"`
 	DataDictionaries              []DataDictionary               `json:"dataDictionaries"`
+	MenuLabels                    map[string]string              `json:"menuLabels,omitempty"`
 	Updates                       []UpdatePackage                `json:"updates"`
 	BackupDrills                  []BackupDrill                  `json:"backupDrills"`
 	GatewayRoutes                 []GatewayRoute                 `json:"gatewayRoutes"`
