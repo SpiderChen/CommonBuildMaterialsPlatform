@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -30,19 +31,15 @@ jobs:
           node-version: 20
 
       - name: Install Wails CLI
-        shell: bash
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
       - name: Install frontend dependencies
-        shell: bash
         working-directory: ERP/frontend
         run: npm ci
 
       - name: Build Windows desktop app
-        shell: bash
         working-directory: ERP/frontend
-        run: |
-          wails build -platform windows/amd64 -webview2 browser -o CommonBuildMaterialsPlatform.exe
+        run: wails build -platform windows/amd64 -webview2 browser -o CommonBuildMaterialsPlatform.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
