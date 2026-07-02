@@ -1,17 +1,58 @@
+# OS/editor files
 .DS_Store
+
+# Local tools and logs
 .tools/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment and secret files
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Build outputs and caches
 dist/
+build/
+coverage/
+.vite/
+bin/
+*.exe
+*.test
+*.out
+
+# Existing service build outputs
 backend/dist/
 industrial-control-gateway/dist/
 customer-site-agent/dist/
 gps-forwarder/dist/
-customer-site-agent/data/
-backend/data/*.vault
-backend/data/*.vault.tmp
-backend/data/*.log
+
+# Frontend generated files
 frontend/build/
 frontend/bin/
 frontend/dist/
 frontend/node_modules/
 frontend/wailsjs/
-*.log
+ERP/frontend/build/
+ERP/frontend/bin/
+ERP/frontend/dist/
+ERP/frontend/node_modules/
+ERP/frontend/wailsjs/
+
+# Local application data
+tmp/
+*.vault
+*.vault.tmp
+customer-site-agent/data/
+backend/data/*.vault
+backend/data/*.vault.tmp
+backend/data/*.log
+ERP/backend/data/*.vault
+ERP/backend/data/*.vault.tmp
+ERP/backend/data/*.log

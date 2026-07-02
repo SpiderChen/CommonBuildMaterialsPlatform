@@ -52,28 +52,7 @@ import type {
   PaymentPlan,
   PortalOverview,
   Product,
-  ProductAlertChannel,
-  ProductAlertNotification,
   PricePolicy,
-  ProductAlertPolicy,
-  ProductAlertRule,
-  ProductInstance,
-  ProductMonitoringEvent,
-  ProductMonitoringIntegration,
-  ProductOpsOverview,
-  ProductRenewalApproval,
-  ProductRenewalContract,
-  ProductRenewalESign,
-  ProductRenewalInvoice,
-  ProductRenewalIntegration,
-  ProductRenewalPayment,
-  ProductRenewalQuote,
-  ProductRenewalSyncRecord,
-  ProductRenewalTask,
-  ProductTelemetryEvent,
-  ProductSystemUpdateTask,
-  ProductUpdateExecution,
-  ProductUpdateRollout,
   Project,
   PricingQuote,
   TrackReplay,
@@ -106,7 +85,6 @@ import type {
   TicketPrintLog,
   TicketVoidLog,
   SystemBundle,
-  SystemAlert,
   TaxRate,
   UpdatePackage,
   UpdatePackageDownload,
@@ -259,6 +237,17 @@ export class APIClient {
       method: "POST",
       body: JSON.stringify(payload)
     });
+  }
+
+  async updateMasterResource<T>(resource: string, id: number, payload: Partial<T>) {
+    return this.request<T>(`/master/${resource}/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async deleteMasterResource<T>(resource: string, id: number) {
+    return this.request<T>(`/master/${resource}/${id}`, { method: "DELETE" });
   }
 
   async setDefaultCustomerContact(id: number) {
@@ -912,203 +901,6 @@ export class APIClient {
       this.request<DataDictionary[]>("/system/dictionaries")
     ]);
     return { plugins, pluginRuns, updates, licenseVerified, licensePackages, licenseIssues, licenseRevocations, licensePortal, security, runtime, backups, backupDrills, approvalFlows, dictionaries };
-  }
-
-  async productOpsOverview() {
-    return this.request<ProductOpsOverview>("/product-ops/overview");
-  }
-
-  async saveProductInstance(payload: Partial<ProductInstance>) {
-    return this.request<ProductInstance>("/product-ops/instances", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async createSystemAlert(payload: Partial<SystemAlert>) {
-    return this.request<SystemAlert>("/product-ops/alerts", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async handleSystemAlert(id: number, remark: string) {
-    return this.request<SystemAlert>(`/product-ops/alerts/${id}/handle`, {
-      method: "POST",
-      body: JSON.stringify({ remark })
-    });
-  }
-
-  async escalateSystemAlert(id: number, level: string, remark: string) {
-    return this.request<SystemAlert>(`/product-ops/alerts/${id}/escalate`, {
-      method: "POST",
-      body: JSON.stringify({ level, remark })
-    });
-  }
-
-  async saveProductAlertPolicy(payload: Partial<ProductAlertPolicy>) {
-    return this.request<ProductAlertPolicy>("/product-ops/alerts/policies", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async saveProductAlertChannel(payload: Partial<ProductAlertChannel>) {
-    return this.request<ProductAlertChannel>("/product-ops/alerts/channels", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async retryAlertNotification(id: number) {
-    return this.request<ProductAlertNotification>(`/product-ops/alerts/notifications/${id}/retry`, {
-      method: "POST",
-      body: "{}"
-    });
-  }
-
-  async saveRenewalTask(payload: Partial<ProductRenewalTask>) {
-    return this.request<ProductRenewalTask>("/product-ops/renewals", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async closeRenewalTask(id: number, remark: string) {
-    return this.request<ProductRenewalTask>(`/product-ops/renewals/${id}/close`, {
-      method: "POST",
-      body: JSON.stringify({ remark })
-    });
-  }
-
-  async createRenewalQuote(id: number, payload: Partial<ProductRenewalQuote>) {
-    return this.request<ProductRenewalQuote>(`/product-ops/renewals/${id}/quote`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async createRenewalContract(id: number, payload: Partial<ProductRenewalContract>) {
-    return this.request<ProductRenewalContract>(`/product-ops/renewals/${id}/contract`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async createRenewalPayment(id: number, payload: Partial<ProductRenewalPayment>) {
-    return this.request<ProductRenewalPayment>(`/product-ops/renewals/${id}/payment`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async submitRenewalApproval(id: number, payload: Partial<ProductRenewalApproval> & { action?: "submit" | "approve" | "reject"; approvalId?: number }) {
-    return this.request<ProductRenewalApproval>(`/product-ops/renewals/${id}/approval`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async createRenewalInvoice(id: number, payload: Partial<ProductRenewalInvoice>) {
-    return this.request<ProductRenewalInvoice>(`/product-ops/renewals/${id}/invoice`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async changeRenewalESign(id: number, payload: Partial<ProductRenewalESign> & { action?: "send" | "complete"; signId?: number }) {
-    return this.request<ProductRenewalESign>(`/product-ops/renewals/${id}/esign`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async saveRenewalIntegration(payload: Partial<ProductRenewalIntegration>) {
-    return this.request<ProductRenewalIntegration>("/product-ops/renewals/integrations", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async retryRenewalSyncRecord(id: number) {
-    return this.request<ProductRenewalSyncRecord>(`/product-ops/renewals/sync-records/${id}/retry`, {
-      method: "POST",
-      body: "{}"
-    });
-  }
-
-  async createUpdateRollout(payload: { updateId: number; strategy: string; targetInstanceIds: number[]; remark?: string }) {
-    return this.request<ProductUpdateRollout>("/product-ops/rollouts", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async advanceUpdateRollout(id: number, payload: { action?: "apply" | "fail" | "rollback"; instanceId?: number; message?: string }) {
-    return this.request<ProductUpdateRollout>(`/product-ops/rollouts/${id}/advance`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async executeUpdateRollout(id: number, payload: { action?: "apply" | "rollback"; instanceId?: number; dryRun?: boolean; remark?: string }) {
-    return this.request<ProductUpdateExecution>(`/product-ops/rollouts/${id}/execute`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async createSystemUpdateTask(id: number, payload: { action?: "apply" | "rollback"; instanceId?: number; remark?: string }) {
-    return this.request<ProductSystemUpdateTask>(`/product-ops/rollouts/${id}/system-update-tasks`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async pollSystemUpdateTasks(payload: { updaterToken: string; watermark?: string }) {
-    return this.request<{ accepted: boolean; instance: ProductInstance; tasks: ProductSystemUpdateTask[] }>("/product-ops/system-updates/tasks", {
-      anonymous: true,
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async reportSystemUpdateTask(taskNo: string, payload: { updaterToken: string; status: string; progress?: number; step?: string; message?: string; error?: string; currentVersion?: string; updaterVersion?: string }) {
-    return this.request<ProductSystemUpdateTask>(`/product-ops/system-updates/tasks/${encodeURIComponent(taskNo)}/report`, {
-      anonymous: true,
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async reportTelemetryEvent(payload: Partial<ProductTelemetryEvent> & { probeToken: string }) {
-    return this.request<{ accepted: boolean; event: ProductTelemetryEvent; alert?: SystemAlert }>("/product-ops/telemetry/report", {
-      anonymous: true,
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async saveMonitoringIntegration(payload: Partial<ProductMonitoringIntegration>) {
-    return this.request<ProductMonitoringIntegration>("/product-ops/monitoring/integrations", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async saveProductAlertRule(payload: Partial<ProductAlertRule>) {
-    return this.request<ProductAlertRule>("/product-ops/monitoring/rules", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }
-
-  async reportMonitoringEvent(payload: Partial<ProductMonitoringEvent> & { integrationToken: string; integrationCode?: string }) {
-    return this.request<{ accepted: boolean; event: ProductMonitoringEvent; alert?: SystemAlert }>("/product-ops/monitoring/report", {
-      anonymous: true,
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
   }
 
   async saveApprovalFlow(payload: Partial<ApprovalFlow>) {

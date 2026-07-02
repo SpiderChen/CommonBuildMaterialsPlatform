@@ -102,22 +102,29 @@ func (a *App) laboratory(w http.ResponseWriter, r *http.Request, session Session
 func laboratoryPayload(data AppData) map[string]interface{} {
 	return map[string]interface{}{
 		"kpis":               buildLaboratoryKPI(data),
-		"mixDesigns":         data.MixDesigns,
-		"trialRuns":          data.MixDesignTrialRuns,
-		"qualityInspections": data.QualityInspections,
-		"qualitySamples":     data.QualitySamples,
-		"rawInspections":     data.RawMaterialInspections,
-		"samples":            data.LaboratorySamples,
-		"tests":              data.LaboratoryTests,
-		"equipment":          data.LaboratoryEquipment,
-		"calibrations":       data.LaboratoryCalibrations,
-		"exceptions":         data.QualityExceptions,
-		"batches":            data.ProductionBatches,
-		"receipts":           data.RawMaterialReceipts,
-		"products":           data.Products,
-		"materials":          data.Materials,
-		"sites":              data.Sites,
+		"mixDesigns":         listOrEmpty(data.MixDesigns),
+		"trialRuns":          listOrEmpty(data.MixDesignTrialRuns),
+		"qualityInspections": listOrEmpty(data.QualityInspections),
+		"qualitySamples":     listOrEmpty(data.QualitySamples),
+		"rawInspections":     listOrEmpty(data.RawMaterialInspections),
+		"samples":            listOrEmpty(data.LaboratorySamples),
+		"tests":              listOrEmpty(data.LaboratoryTests),
+		"equipment":          listOrEmpty(data.LaboratoryEquipment),
+		"calibrations":       listOrEmpty(data.LaboratoryCalibrations),
+		"exceptions":         listOrEmpty(data.QualityExceptions),
+		"batches":            listOrEmpty(data.ProductionBatches),
+		"receipts":           listOrEmpty(data.RawMaterialReceipts),
+		"products":           listOrEmpty(data.Products),
+		"materials":          listOrEmpty(data.Materials),
+		"sites":              listOrEmpty(data.Sites),
 	}
+}
+
+func listOrEmpty[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
 
 func (a *App) createLaboratoryMixDesign(w http.ResponseWriter, r *http.Request, session Session) {

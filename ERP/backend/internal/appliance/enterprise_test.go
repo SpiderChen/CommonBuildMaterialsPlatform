@@ -54,7 +54,7 @@ func TestAppFrontendStaticServingIsExplicit(t *testing.T) {
 	}
 }
 
-func TestAPIRootAndCORSAreProductOpsOriented(t *testing.T) {
+func TestAPIRootAndCORSAreERPOriented(t *testing.T) {
 	app := newTestHTTPApp(t)
 
 	rec := httptest.NewRecorder()
@@ -66,22 +66,44 @@ func TestAPIRootAndCORSAreProductOpsOriented(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		t.Fatalf("decode api root: %v", err)
 	}
-	if info["product"] != "product-ops-appliance" || strings.Contains(rec.Body.String(), "Common Build Materials") {
-		t.Fatalf("api root should expose product ops appliance identity: %+v", info)
+	if info["product"] != "common-build-materials-erp" || !strings.Contains(info["name"], "ERP") {
+		t.Fatalf("api root should expose ERP identity: %+v", info)
 	}
 
-	req := httptest.NewRequest(http.MethodOptions, "/api/product-ops/probes/report", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/api/iot/vehicle/location/report", nil)
 	req.Header.Set("Origin", "https://customer-app.example")
-	req.Header.Set("Access-Control-Request-Headers", "X-CBMP-Probe-Token, X-CBMP-Monitoring-Token, X-CBMP-Updater-Token")
+	req.Header.Set("Access-Control-Request-Headers", "X-Device-Key, X-CBMP-Signature")
 	rec = httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("cors preflight status %d: %s", rec.Code, rec.Body.String())
 	}
 	allowed := rec.Header().Get("Access-Control-Allow-Headers")
-	for _, header := range []string{"X-CBMP-Probe-Token", "X-CBMP-Monitoring-Token", "X-CBMP-Updater-Token", "X-CBMP-Signature"} {
+	for _, header := range []string{"X-Device-Key", "X-CBMP-Signature", "X-CBMP-Request-Id"} {
 		if !strings.Contains(allowed, header) {
 			t.Fatalf("cors allow headers missing %s: %s", header, allowed)
+		}
+	}
+}
+
+func TestERPRejectsProductOpsRoutes(t *testing.T) {
+	app := newTestHTTPApp(t)
+	adminToken := testLogin(t, app, "admin", "admin123")
+
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/product-ops/overview", ""},
+		{http.MethodPost, "/api/product-ops/alerts", `{}`},
+		{http.MethodPost, "/api/product-ops/probes/report", `{}`},
+		{http.MethodPost, "/api/product-ops/renewals/sync-callback", `{}`},
+	}
+	for _, item := range cases {
+		rec := testRequest(t, app, adminToken, item.method, item.path, item.body)
+		if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "OperationsPlatform") {
+			t.Fatalf("ERP should reject %s %s, got %d: %s", item.method, item.path, rec.Code, rec.Body.String())
 		}
 	}
 }
@@ -144,6 +166,7 @@ func TestStandaloneProductOpsIgnoresLegacyTenantBoundary(t *testing.T) {
 }
 
 func TestProductAlertEnterpriseChannelDeliveryUsesAuthSignatureAndPayload(t *testing.T) {
+	t.Skip("product operations moved to OperationsPlatform; ERP rejects /api/product-ops/*")
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
 
@@ -2014,6 +2037,7 @@ func TestSCIMProviderProvisioningAndSecurityReport(t *testing.T) {
 }
 
 func TestProductOpsOverviewInstancesAlertsAndUpdates(t *testing.T) {
+	t.Skip("product operations moved to OperationsPlatform; ERP rejects /api/product-ops/*")
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
 
@@ -2676,6 +2700,7 @@ func TestProductOpsOverviewInstancesAlertsAndUpdates(t *testing.T) {
 }
 
 func TestProductRenewalSyncCallbackUpdatesInvoice(t *testing.T) {
+	t.Skip("product operations moved to OperationsPlatform; ERP rejects /api/product-ops/*")
 	app := newTestHTTPApp(t)
 	adminToken := testLogin(t, app, "admin", "admin123")
 

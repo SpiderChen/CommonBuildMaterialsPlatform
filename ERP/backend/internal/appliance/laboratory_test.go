@@ -8,6 +8,44 @@ import (
 	"time"
 )
 
+func TestLaboratoryPayloadEncodesEmptyCollectionsAsArrays(t *testing.T) {
+	raw, err := json.Marshal(laboratoryPayload(AppData{}))
+	if err != nil {
+		t.Fatalf("marshal laboratory payload: %v", err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode laboratory payload: %v", err)
+	}
+
+	fields := []string{
+		"mixDesigns",
+		"trialRuns",
+		"qualityInspections",
+		"qualitySamples",
+		"rawInspections",
+		"samples",
+		"tests",
+		"equipment",
+		"calibrations",
+		"exceptions",
+		"batches",
+		"receipts",
+		"products",
+		"materials",
+		"sites",
+	}
+	for _, field := range fields {
+		var items []json.RawMessage
+		if err := json.Unmarshal(payload[field], &items); err != nil {
+			t.Fatalf("expected %s to be a JSON array, got %s: %v", field, string(payload[field]), err)
+		}
+		if items == nil {
+			t.Fatalf("expected %s to decode as a non-nil slice", field)
+		}
+	}
+}
+
 func TestLaboratoryMixDesignLifecycleAndProductionDefault(t *testing.T) {
 	app := newTestHTTPApp(t)
 	qualityToken := testLogin(t, app, "quality", "quality123")

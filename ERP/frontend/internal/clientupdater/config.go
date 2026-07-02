@@ -58,7 +58,7 @@ func NormalizeConfig(cfg Config) (Config, error) {
 
 func defaultConfig() Config {
 	return Config{
-		BaseURL:               "http://127.0.0.1:8088",
+		BaseURL:               "http://127.0.0.1:8095",
 		RootDir:               "data/client-updater",
 		TargetComponent:       "client",
 		PollIntervalSeconds:   30,
@@ -102,8 +102,8 @@ func applyEnv(cfg *Config) {
 
 func SampleConfig() Config {
 	return Config{
-		BaseURL:               "http://127.0.0.1:8088",
-		UpdaterToken:          "probe-token-from-product-instance",
+		BaseURL:               "http://127.0.0.1:8095",
+		UpdaterToken:          "updater-token-from-operations-platform",
 		Watermark:             "CBMP-CUSTOMER",
 		RootDir:               "/opt/cbmp/client-updater",
 		TargetComponent:       "client",

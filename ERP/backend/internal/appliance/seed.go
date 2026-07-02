@@ -39,7 +39,7 @@ func SeedData() AppData {
 			CustomerName: "湾区建材集团",
 			Watermark:    "CBMP-DEMO-WANQU-2026",
 			ExpiresAt:    "2027-12-31",
-			Edition:      "Product Ops Appliance",
+			Edition:      "ERP Appliance",
 			Modules:      []string{"erp", "production", "quality", "dispatch", "gps", "weighbridge", "settlement", "report", "plugin", "update"},
 			MaxSites:     20,
 			MaxVehicles:  5000,
@@ -498,7 +498,7 @@ func SeedData() AppData {
 		Updates: []UpdatePackage{
 			{ID: 1, Version: "1.0.0", Component: "server", Channel: "stable", Status: "installed", Checksum: "sha256:server-100", Signature: "sig:server-100", CreatedAt: "2026-06-18 08:00:00", Remark: "服务端初始交付版本"},
 			{ID: 2, Version: "1.0.1", Component: "server", Channel: "gray", Status: "available", Checksum: "sha256:server-101", Signature: "sig:server-101", RollbackVersion: "1.0.0", CreatedAt: "2026-06-18 09:30:00", Remark: "服务端异常告警与更新策略灰度包"},
-			{ID: 3, Version: "1.0.1", Component: "client", Channel: "stable", Status: "available", Checksum: "sha256:client-101", Signature: "sig:client-101", RollbackVersion: "1.0.0", CreatedAt: "2026-06-18 10:00:00", Remark: "Wails 客户端运营台更新包"},
+			{ID: 3, Version: "1.0.1", Component: "client", Channel: "stable", Status: "available", Checksum: "sha256:client-101", Signature: "sig:client-101", RollbackVersion: "1.0.0", CreatedAt: "2026-06-18 10:00:00", Remark: "Wails 客户端业务工作台更新包"},
 		},
 		SystemAlerts: []SystemAlert{
 			{ID: 1, AlertNo: "AL202606190001", InstanceID: 2, CustomerName: "华南骨料运营中心", Severity: "critical", Source: "client", Title: "客户端版本落后", Message: "客户现场仍有 1.0.0 客户端，建议推送 1.0.1 更新包", Status: "open", GroupKey: "instance:2|source:client|component:client|metric:update_version|title:客户端版本落后", PolicyNo: "AP202606190001", EventCount: 2, SuppressedUntil: "2026-06-19 08:40:00", FirstSeenAt: "2026-06-19 08:10:00", LastSeenAt: "2026-06-19 08:10:00"},
@@ -543,7 +543,7 @@ func SeedData() AppData {
 			{ID: 2, EventNo: "TE202606190002", InstanceID: 2, CustomerName: "华南骨料运营中心", Watermark: "CBMP-HN-OPS", Source: "log", Component: "client", Severity: "critical", EventType: "runtime_error", TraceID: "trace-hn-002", ErrorMessage: "客户端同步任务连续失败", Message: "客户端同步任务连续失败", OccurredAt: "2026-06-19 08:12:00", ReceivedAt: "2026-06-19 08:12:04", SourceIP: "127.0.0.1", AlertRaised: true},
 		},
 		ProductMonitoringIntegrations: []ProductMonitoringIntegration{
-			{ID: 1, IntegrationNo: "MI202606190001", Name: "Prometheus 客户现场告警", Code: "prometheus-site", Provider: "prometheus", Endpoint: "/api/product-ops/monitoring/report", Token: "mon-prometheus-site", Status: "active", LastEventAt: "2026-06-19 08:50:00", CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:00:00", Remark: "接收 Alertmanager webhook"},
+			{ID: 1, IntegrationNo: "MI202606190001", Name: "Prometheus 客户现场告警", Code: "prometheus-site", Provider: "prometheus", Endpoint: "mock://operations-platform-monitoring", Token: "mon-prometheus-site", Status: "active", LastEventAt: "2026-06-19 08:50:00", CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:00:00", Remark: "接收 Alertmanager webhook"},
 		},
 		ProductAlertRules: []ProductAlertRule{
 			{ID: 1, RuleNo: "AR202606190001", Name: "CPU 使用率过高", Source: "prometheus", Component: "server", Metric: "cpu_percent", Operator: ">=", Threshold: 85, Severity: "critical", Status: "active", NotifyChannels: []string{"sse", "webhook"}, CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:05:00", Remark: "客户现场服务端 CPU 持续高于阈值"},
@@ -557,7 +557,7 @@ func SeedData() AppData {
 			{ID: 2, PolicyNo: "AP202606190002", Name: "授权风险每日提醒", Source: "license", Component: "license", Metric: "license_expire", Severity: "warning", AggregateWindowMinutes: 1440, SuppressMinutes: 1440, EscalateAfterMinutes: 0, EscalateTo: "renewal_owner", NotifyChannels: []string{"sse"}, Status: "active", CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:05:00", Remark: "授权到期风险按天聚合，避免反复提醒"},
 		},
 		ProductAlertChannels: []ProductAlertChannel{
-			{ID: 1, ChannelNo: "AC202606190001", Name: "运营台实时事件", Code: "sse", Type: "sse", Status: "active", RetryLimit: 1, TimeoutSeconds: 1, CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:00:00", Remark: "站内实时通知"},
+			{ID: 1, ChannelNo: "AC202606190001", Name: "内部告警实时事件", Code: "sse", Type: "sse", Status: "active", RetryLimit: 1, TimeoutSeconds: 1, CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:00:00", Remark: "站内实时通知"},
 			{ID: 2, ChannelNo: "AC202606190002", Name: "值班 Webhook", Code: "webhook", Type: "webhook", Endpoint: "mock://success", Status: "active", RetryLimit: 3, TimeoutSeconds: 3, LastDeliveredAt: "2026-06-19 08:10:00", CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:01:00", Remark: "可替换为企业微信/飞书/ITSM webhook"},
 			{ID: 3, ChannelNo: "AC202606190003", Name: "短信备用通道", Code: "sms", Type: "sms", Status: "active", RetryLimit: 3, TimeoutSeconds: 3, LastError: "通知通道未配置 endpoint", CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:02:00", Remark: "生产部署需配置短信网关 endpoint"},
 			{ID: 4, ChannelNo: "AC202606190004", Name: "企业微信值班群", Code: "enterprise_wechat", Type: "enterprise_wechat", Endpoint: "mock://success", Token: "wecom-demo-token", Secret: "wecom-demo-secret", Status: "active", RetryLimit: 3, TimeoutSeconds: 3, LastDeliveredAt: "2026-06-19 08:12:00", CreatedBy: "平台管理员", CreatedAt: "2026-06-19 08:03:00", Remark: "按企业微信机器人 markdown payload 投递，生产替换为真实机器人 endpoint"},

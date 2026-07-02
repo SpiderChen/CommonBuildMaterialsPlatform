@@ -72,9 +72,6 @@ func withCORS(next http.Handler) http.Handler {
 			"X-CBMP-Timestamp",
 			"X-CBMP-Signature",
 			"X-CBMP-Request-Id",
-			"X-CBMP-Updater-Token",
-			"X-CBMP-Probe-Token",
-			"X-CBMP-Monitoring-Token",
 			"X-CBMP-Channel-Token",
 		}, ", "))
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -119,9 +116,9 @@ func (a *App) apiHandler(w http.ResponseWriter, r *http.Request) {
 	parts := splitPath(path)
 	if len(parts) == 0 {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"name":        "产品运营交付平台 API",
-			"product":     "product-ops-appliance",
-			"description": "单独内部运营平台，用于客户实例授权续费、异常报警、客户端/服务端更新包和端内系统更新管理",
+			"name":        "建材 ERP API",
+			"product":     "common-build-materials-erp",
+			"description": "客户侧私有化建材 ERP，用于销售、生产、实验室、调度、地磅、签收、结算、采购、库存和财务管理",
 		})
 		return
 	}
@@ -147,6 +144,10 @@ func (a *App) apiHandler(w http.ResponseWriter, r *http.Request) {
 		a.scim(w, r, parts[2:])
 		return
 	}
+	if parts[0] == "product-ops" {
+		writeError(w, http.StatusNotFound, "product operations APIs belong to OperationsPlatform, not ERP")
+		return
+	}
 	if isTaxGatewayCallbackPath(parts) && r.Method == http.MethodPost {
 		a.taxGatewayCallback(w, r)
 		return
@@ -155,28 +156,8 @@ func (a *App) apiHandler(w http.ResponseWriter, r *http.Request) {
 		a.collectionCallback(w, r)
 		return
 	}
-	if isProductRenewalSyncCallbackPath(parts) && r.Method == http.MethodPost {
-		a.productRenewalSyncCallback(w, r)
-		return
-	}
 	if parts[0] == "public" && len(parts) >= 2 && parts[1] == "delivery-sign" {
 		a.publicDeliverySign(w, r, parts[2:])
-		return
-	}
-	if parts[0] == "product-ops" && len(parts) == 3 && parts[1] == "probes" && parts[2] == "report" {
-		a.productOpsProbeReport(w, r)
-		return
-	}
-	if parts[0] == "product-ops" && len(parts) == 3 && parts[1] == "telemetry" && parts[2] == "report" {
-		a.productOpsTelemetryReport(w, r)
-		return
-	}
-	if parts[0] == "product-ops" && len(parts) == 3 && parts[1] == "monitoring" && parts[2] == "report" {
-		a.productOpsMonitoringReport(w, r)
-		return
-	}
-	if parts[0] == "product-ops" && len(parts) >= 3 && parts[1] == "system-updates" {
-		a.productOpsSystemUpdate(w, r, parts[2:])
 		return
 	}
 	if parts[0] == "system" && len(parts) == 4 && parts[1] == "updates" && parts[3] == "download" && r.Method == http.MethodGet && updaterTokenFromRequest(r, "") != "" {
@@ -211,8 +192,6 @@ func (a *App) apiHandler(w http.ResponseWriter, r *http.Request) {
 		a.bootstrap(w, r, session)
 	case "dashboard":
 		a.dashboard(w, r, session)
-	case "product-ops":
-		a.productOps(w, r, session, parts[1:])
 	case "master":
 		a.master(w, r, session, parts[1:])
 	case "contracts":
@@ -276,10 +255,6 @@ func isTaxGatewayCallbackPath(parts []string) bool {
 
 func isCollectionCallbackPath(parts []string) bool {
 	return len(parts) == 3 && parts[0] == "finance" && parts[1] == "collections" && parts[2] == "callback"
-}
-
-func isProductRenewalSyncCallbackPath(parts []string) bool {
-	return len(parts) == 3 && parts[0] == "product-ops" && parts[1] == "renewals" && parts[2] == "sync-callback"
 }
 
 func (a *App) mustSnapshot() AppData {
@@ -705,6 +680,19 @@ func (a *App) master(w http.ResponseWriter, r *http.Request, session Session, pa
 	}
 	if len(parts) == 2 && resource == "pricing" && parts[1] == "evaluate" && r.Method == http.MethodPost {
 		a.evaluatePricing(w, r, session)
+		return
+	}
+	if len(parts) == 2 && (r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
+		id, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || id <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid master resource id")
+			return
+		}
+		if r.Method == http.MethodDelete {
+			a.deleteMasterResource(w, r, session, resource, id)
+			return
+		}
+		a.updateMasterResource(w, r, session, resource, id)
 		return
 	}
 	if r.Method == http.MethodGet {
